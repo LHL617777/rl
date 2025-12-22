@@ -71,6 +71,13 @@ def get_logger(
         logger = TrackioLogger(
             project=project, exp_name=experiment_name, **trackio_kwargs
         )
+    elif logger_type == "swanlab":
+        from torchrl.record.loggers.swanlab import SwanLabLogger
+
+        swanlab_kwargs = kwargs.get("swanlab_kwargs", {})
+        logger = SwanLabLogger(
+            log_dir=logger_name, exp_name=experiment_name, **swanlab_kwargs
+        )
     elif logger_type in ("", None):
         return None
     else:

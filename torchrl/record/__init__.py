@@ -14,4 +14,5 @@ __all__ = [
     "PixelRenderTransform",
     "TensorDictRecorder",
     "VideoRecorder",
+    "SwanLabLogger",
 ]

@@ -9,7 +9,7 @@ collector:
 
 # logger
 logger:
-  backend: wandb
+  backend: swanlab
   project_name: torchrl_example_ppo
   group_name: null
   exp_name: Mujoco_Schulman17

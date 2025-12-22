@@ -9,10 +9,17 @@ results from Schulman et al. 2017 for the on MuJoCo Environments.
 """
 from __future__ import annotations
 
+import sys
+# 添加本地自定义torchrl的根目录（E:\rl\torchrl\的上一级目录，即E:\rl\）
+# 注意：Windows路径中反斜杠需要转义为\\，或使用原始字符串r""
+sys.path.insert(0, "E:\\rl")  # insert(0)表示将该路径放在搜索优先级第1位
+
 import warnings
 
 import hydra
+import torchrl
 from torchrl._utils import compile_with_warmup
+from torchrl.record.loggers.swanlab import SwanLabLogger
 
 
 @hydra.main(config_path="", config_name="config_mujoco", version_base="1.1")
@@ -66,7 +73,7 @@ def main(cfg: DictConfig):  # noqa: F821
 
     # Create collector
     collector = SyncDataCollector(
-        create_env_fn=make_env(cfg.env.env_name, device),
+        create_env_fn=make_env(cfg.env.env_name, device),  # 传入训练环境函数，见utils_mujoco.py，是 MuJoCo 环境的封装函数
         policy=actor,
         frames_per_batch=cfg.collector.frames_per_batch,
         total_frames=cfg.collector.total_frames,
@@ -127,10 +134,16 @@ def main(cfg: DictConfig):  # noqa: F821
             cfg.logger.backend,
             logger_name="ppo",
             experiment_name=exp_name,
-            wandb_kwargs={
-                "config": dict(cfg),
-                "project": cfg.logger.project_name,
+            # wandb_kwargs={
+            #     "config": dict(cfg),
+            #     "project": cfg.logger.project_name,
+            #     "group": cfg.logger.group_name,
+            # },
+            swanlab_kwargs={
+                "config": cfg,
                 "group": cfg.logger.group_name,
+                "project": cfg.logger.project_name
+                or f"swanlab_{cfg.env.scenario_name}",
             },
         )
         logger_video = cfg.logger.video
@@ -138,7 +151,7 @@ def main(cfg: DictConfig):  # noqa: F821
         logger_video = False
 
     # Create test environment
-    test_env = make_env(cfg.env.env_name, device, from_pixels=logger_video)
+    test_env = make_env(cfg.env.env_name, device, from_pixels=logger_video) # 测试环境：单独创建用于评估策略性能，支持视频录制
     if logger_video:
         test_env = test_env.append_transform(
             VideoRecorder(logger, tag="rendering/test", in_keys=["pixels"])
