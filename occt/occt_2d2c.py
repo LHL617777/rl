@@ -549,12 +549,12 @@ class TwoCarrierEnv(gym.Env):
         #     print("可视化功能已关闭或非rgb_array模式，不生成视频")
 
 
-# 注册环境（便于通过gym.make()调用）
+# 注册环境（导入时自动注册）
 gym.register(
     id="TwoCarrierEnv-v0",
     entry_point=TwoCarrierEnv,
     max_episode_steps=1000,
-    kwargs={"enable_visualization": True}  # 添加默认参数
+    kwargs={"enable_visualization": False}  # 添加默认参数
 )
 
 # 测试代码
