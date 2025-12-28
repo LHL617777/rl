@@ -1,15 +1,12 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
+# 模型训练脚本：PPO算法在OCCT环境中的实现
 
 """
-This script reproduces the Proximal Policy Optimization (PPO) Algorithm
-results from Schulman et al. 2017 for the on MuJoCo Environments.
+This script reproduces the Proximal Policy Optimization (PPO) Algorithm.
 """
 from __future__ import annotations
 
 import sys
+import os
 # 添加本地自定义torchrl的根目录（E:\rl\torchrl\的上一级目录，即E:\rl\）
 sys.path.insert(0, "E:\\rl")  # insert(0)表示将该路径放在搜索优先级第1位
 
@@ -212,6 +209,35 @@ def main(cfg: DictConfig):  # noqa: F821
     cfg_logger_num_test_episodes = cfg.logger.num_test_episodes
     losses = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
 
+    # checkpoint saving
+    if cfg.checkpoint.save_interval > 0:
+        def save_checkpoint(frame):
+            ckpt_dict = {
+                "actor_state_dict": actor.state_dict(),
+                "critic_state_dict": critic.state_dict(),
+                "optim_state_dict": optim.state_dict(),
+                "cfg": cfg,
+            }
+            save_dir = cfg.checkpoint.save_prefix
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"checkpoint_{frame}_frames.pt")
+            torch.save(
+                ckpt_dict,
+                save_path,
+            )
+        for frame in range(
+            cfg_logger_test_interval,
+            cfg.collector.total_frames + 1,
+            cfg.checkpoint.save_interval,
+        ):
+            pbar.register_callback(
+                lambda pbar, frame=frame: save_checkpoint(frame)
+                if pbar.n >= frame
+                and (pbar.n - pbar.last_print_n) < cfg.checkpoint.save_interval
+                else None
+            )
+    
+        
     collector_iter = iter(collector)
     total_iter = len(collector)
     for i in range(total_iter):

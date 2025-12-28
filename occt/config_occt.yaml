@@ -12,8 +12,8 @@ logger:
   backend: swanlab
   project_name: torchrl_example_ppo
   group_name: null
-  exp_name: Mujoco_Schulman17
-  test_interval: 10_000
+  exp_name: OCCT_PPO_experiment
+  test_interval: 102_40
   num_test_episodes: 5
   video: False
 
@@ -40,3 +40,8 @@ compile:
   compile: False
   compile_mode:
   cudagraphs: False
+
+checkpoint:
+  save_interval: 102_40
+  keep_interval: 512_00
+  checkpoint_dir: ./checkpoints_occt/
