@@ -4,11 +4,11 @@
 This script reproduces the Proximal Policy Optimization (PPO) Algorithm.
 """
 from __future__ import annotations
-
 import sys
 import os
 # 添加本地自定义torchrl的根目录（E:\rl\torchrl\的上一级目录，即E:\rl\）
 sys.path.insert(0, "E:\\rl")  # insert(0)表示将该路径放在搜索优先级第1位
+# sys.path.insert(0, "/home/yons/Graduation/rl")  # Linux系统中的路径
 
 import warnings
 
@@ -18,11 +18,13 @@ from torchrl._utils import compile_with_warmup
 from torchrl.record.loggers.swanlab import SwanLabLogger
 import gymnasium as gym
 from occt_2d2c import TwoCarrierEnv
-
+# 补全缺失的导入
+from omegaconf import DictConfig
+from torchrl.collectors import Collector
 
 
 @hydra.main(config_path="", config_name="config_occt", version_base="1.1")
-def main(cfg: DictConfig):  # noqa: F821
+def main(cfg: DictConfig):
 
     import torch.optim
     import tqdm
@@ -31,7 +33,6 @@ def main(cfg: DictConfig):  # noqa: F821
     from tensordict.nn import CudaGraphModule
 
     from torchrl._utils import timeit
-    from torchrl.collectors import Collector
     from torchrl.data import LazyTensorStorage, TensorDictReplayBuffer
     from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
     from torchrl.envs import ExplorationType, set_exploration_type
@@ -72,7 +73,7 @@ def main(cfg: DictConfig):  # noqa: F821
 
     # Create collector
     collector = Collector(
-        create_env_fn=make_env(cfg.env.env_name, device),  
+        create_env_fn=make_env(cfg.env.env_name, device),
         policy=actor,
         frames_per_batch=cfg.collector.frames_per_batch,
         total_frames=cfg.collector.total_frames,
@@ -150,7 +151,7 @@ def main(cfg: DictConfig):  # noqa: F821
         logger_video = False
 
     # Create test environment
-    test_env = make_env(cfg.env.env_name, device, from_pixels=logger_video) # 测试环境：单独创建用于评估策略性能，支持视频录制
+    test_env = make_env(cfg.env.env_name, device, from_pixels=logger_video)  # 测试环境：单独创建用于评估策略性能，支持视频录制
     if logger_video:
         test_env = test_env.append_transform(
             VideoRecorder(logger, tag="rendering/test", in_keys=["pixels"])
@@ -161,12 +162,12 @@ def main(cfg: DictConfig):  # noqa: F821
         optim.zero_grad(set_to_none=True)
         # Linearly decrease the learning rate and clip epsilon
         alpha = torch.ones((), device=device)
-        if cfg_optim_anneal_lr:
+        if cfg.optim.anneal_lr:
             alpha = 1 - (num_network_updates / total_network_updates)
             for group in optim.param_groups:
-                group["lr"] = cfg_optim_lr * alpha
-        if cfg_loss_anneal_clip_eps:
-            loss_module.clip_epsilon.copy_(cfg_loss_clip_epsilon * alpha)
+                group["lr"] = cfg.optim.lr * alpha
+        if cfg.loss.anneal_clip_epsilon:
+            loss_module.clip_epsilon.copy_(cfg.loss.clip_epsilon * alpha)
         num_network_updates = num_network_updates + 1
 
         # Forward pass PPO loss
@@ -197,7 +198,12 @@ def main(cfg: DictConfig):  # noqa: F821
     # Main loop
     collected_frames = 0
     num_network_updates = torch.zeros((), dtype=torch.int64, device=device)
-    pbar = tqdm.tqdm(total=cfg.collector.total_frames)
+    pbar = tqdm.tqdm(
+        total=cfg.collector.total_frames,
+        desc="Training",
+        leave=True,
+        dynamic_ncols=True
+    )
 
     # extract cfg variables
     cfg_loss_ppo_epochs = cfg.loss.ppo_epochs
@@ -209,35 +215,27 @@ def main(cfg: DictConfig):  # noqa: F821
     cfg_logger_num_test_episodes = cfg.logger.num_test_episodes
     losses = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
 
-    # checkpoint saving
-    if cfg.checkpoint.save_interval > 0:
-        def save_checkpoint(frame):
-            ckpt_dict = {
-                "actor_state_dict": actor.state_dict(),
-                "critic_state_dict": critic.state_dict(),
-                "optim_state_dict": optim.state_dict(),
-                "cfg": cfg,
-            }
-            save_dir = cfg.checkpoint.save_prefix
-            os.makedirs(save_dir, exist_ok=True)
-            save_path = os.path.join(save_dir, f"checkpoint_{frame}_frames.pt")
-            torch.save(
-                ckpt_dict,
-                save_path,
-            )
-        for frame in range(
-            cfg_logger_test_interval,
-            cfg.collector.total_frames + 1,
-            cfg.checkpoint.save_interval,
-        ):
-            pbar.register_callback(
-                lambda pbar, frame=frame: save_checkpoint(frame)
-                if pbar.n >= frame
-                and (pbar.n - pbar.last_print_n) < cfg.checkpoint.save_interval
-                else None
-            )
-    
-        
+    # ===================== 替换：手动保存Checkpoint（删除原回调逻辑）=====================
+    def save_checkpoint(current_frames):
+        """封装Checkpoint保存逻辑，适配cfg配置"""
+        ckpt_dict = {
+            "actor_state_dict": actor.state_dict(),
+            "critic_state_dict": critic.state_dict(),
+            "optim_state_dict": optim.state_dict(),
+            "cfg": cfg,
+            "collected_frames": current_frames,
+        }
+        # 修正：使用cfg.checkpoint.checkpoint_dir（与你的配置文件对齐，替换原save_prefix）
+        save_dir = cfg.checkpoint.checkpoint_dir
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"checkpoint_{current_frames}_frames.pt")
+        torch.save(ckpt_dict, save_path)
+        print(f"\n✅ Checkpoint saved to: {save_path}")
+
+    # 提取保存配置（从cfg读取，避免硬编码）
+    save_interval = cfg.checkpoint.save_interval
+    last_saved_frames = 0  # 记录上一次保存的帧数，避免重复保存
+
     collector_iter = iter(collector)
     total_iter = len(collector)
     for i in range(total_iter):
@@ -250,6 +248,12 @@ def main(cfg: DictConfig):  # noqa: F821
         frames_in_batch = data.numel()
         collected_frames += frames_in_batch
         pbar.update(frames_in_batch)
+
+        # ===== 新增：手动判断是否达到保存间隔，触发Checkpoint保存 =====
+        if save_interval > 0:
+            if collected_frames // save_interval > last_saved_frames // save_interval:
+                save_checkpoint(collected_frames)
+                last_saved_frames = collected_frames
 
         # Get training rewards and episode lengths
         episode_rewards = data["next", "episode_reward"][data["next", "done"]]
@@ -329,9 +333,15 @@ def main(cfg: DictConfig):  # noqa: F821
 
         collector.update_policy_weights_()
 
+    # ===================== 新增：训练结束后保存最终Checkpoint =====================
+    if save_interval > 0:
+        save_checkpoint(cfg.collector.total_frames)
+    
     collector.shutdown()
     if not test_env.is_closed:
         test_env.close()
+    pbar.close()
+    print("\n🎉 训练完成，所有Checkpoint已保存！")
 
 
 if __name__ == "__main__":
