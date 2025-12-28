@@ -1,0 +1,75 @@
+# Numbers
+N_c: 2 # number of carriers
+N_q: 5 # number of generalized coordinates
+N_x: 10 # number of state variables
+N_u: 8 # number of control variables
+
+# Parameters
+M_o: 7445
+I_o: 8038
+M_1: 1368
+M_2: 1368
+I_1: 1589
+I_2: 1589
+x__o_1: 3
+x__o_2: -3
+y__o_1: 0
+y__o_2: 0
+x__1_1: -0.5
+x__2_2: 0.5
+y__1_1: 0
+y__2_2: 0
+C_f: -45294
+C_r: -45388
+l_f: 1.17
+l_r: 1.25
+
+# Initial values
+X_o_0: 0
+Y_o_0: 0
+Psi_o_0: 0
+Psi_1_0: 0
+Psi_2_0: 0
+X_dot_o_0: 0
+Y_dot_o_0: 0
+Psi_dot_o_0: 0
+Psi_dot_1_0: 0
+Psi_dot_2_0: 0
+
+# 保留平级的T、dt、integrator（满足Model2D2C初始化）
+T: 10.0
+dt: 0.01
+integrator: "RK4" # 'RK4', 'EE'
+
+# 铰接力相关配置（满足RL代码安全惩罚）
+
+force_safe: 2000.0 # 铰接力安全阈值（可调整）
+size: 0.2
+width_Fh: 0.1
+c_hinge: "#0077BB"
+ms_hinge: 60
+scale_Fh: 0.0003
+
+# 载荷应力相关配置（满足RL代码安全惩罚）
+load:
+  sigma_safe: 1000.0 # 应力安全阈值（可调整）
+
+#################
+# Visualization #
+framerate: 10 # frames per second
+range: 6 # XY ±range in the plot
+R: 0.3 # tire radius
+lw_tire: 20
+alpha_o: 0.4
+w_c: 1.2 # width
+fe_c: 1.77 # front end
+re_c: 1.85 # rear end
+alpha_c: 0.6
+
+oversized_cargo_bias: 3 # 超大件半长
+oversized_cargo_width: 2.5 # 货物宽度
+
+fc_o: "#7f8c8d" # 完整十六进制格式，不要省略字符
+fc_c: ["#3498db", "#e74c3c"] # 列表格式，每个颜色完整
+c_tire: "black"
+c_Fh: "green"

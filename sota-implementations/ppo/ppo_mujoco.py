@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import sys
 # 添加本地自定义torchrl的根目录（E:\rl\torchrl\的上一级目录，即E:\rl\）
-# 注意：Windows路径中反斜杠需要转义为\\，或使用原始字符串r""
 sys.path.insert(0, "E:\\rl")  # insert(0)表示将该路径放在搜索优先级第1位
 
 import warnings
