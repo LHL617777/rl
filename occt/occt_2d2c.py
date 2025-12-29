@@ -13,13 +13,14 @@ from matplotlib.animation import FuncAnimation
 import cv2
 from PIL import Image
 from io import BytesIO
+import torch
 
 plt.rcParams["font.sans-serif"]=["SimHei"] #设置字体
 plt.rcParams["axes.unicode_minus"]=False #该语句解决图像中的“-”负号的乱码问题
 
 class TwoCarrierEnv(gym.Env):
     """两辆车运载超大件系统的自定义强化学习环境"""
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 5}
 
     def __init__(self, render_mode=None, config_path=None, enable_visualization=False):
         super().__init__()
@@ -293,7 +294,8 @@ class TwoCarrierEnv(gym.Env):
 
         return observation, reward, terminated, truncated, info
 
-    def reset(self, seed=None, options=None, clear_frames=True):
+    # 保留你所有原有导入和类定义，仅修改reset方法
+    def reset(self, seed=None, options=None, clear_frames=None):
         super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)  # 重置随机数生成器，保证可复现
@@ -310,18 +312,29 @@ class TwoCarrierEnv(gym.Env):
             self.steer_max_bound
         )
         if hasattr(self, '_prev_u1_noisy'):
-            del self._prev_u1_noisy # 重置第一辆车扰动历史
+            del self._prev_u1_noisy  # 重置第一辆车扰动历史
+        
+        # 2. 处理options，提取clear_frames（优先从options获取，适配auto_reset=True）
+        options = options or {}
+        # 优先级：options中的clear_frames > 显式传入的clear_frames > 默认False
+        final_clear_frames = options.get(
+            "clear_frames", 
+            clear_frames if clear_frames is not None else False
+        )
+        
         if self.enable_visualization:
-            if clear_frames and not self.is_sim_finished:
+            # 3. 仅当final_clear_frames=True时，才清空帧列表（修改原有判断条件）
+            if final_clear_frames and not self.is_sim_finished:
                 self.render_frames = []
-            self.trajectories = {   # 重置轨迹
+            self.trajectories = {   # 重置轨迹（保留原有逻辑，不变）
                 'cargo': [],
                 'car1': [],
                 'car2': [],
                 'hinge1': [],
                 'hinge2': []
             }
-            self._reset_visualization()  # 仅在启用时初始化可视化
+            self._reset_visualization() 
+        self.is_sim_finished = False
         observation = self._get_observation()
         return observation, {}
 
@@ -354,7 +367,7 @@ class TwoCarrierEnv(gym.Env):
         """重构可视化初始化，完全参考参考代码的绘图元素类型"""
         if self.fig is not None:
             plt.close(self.fig)
-        self.fig, self.ax = plt.subplots(figsize=(15, 15), dpi=80)
+        self.fig, self.ax = plt.subplots(figsize=(8, 8), dpi=60)
         self.fig.subplots_adjust(left=0.05, bottom=0.05, right=0.95, top=0.95)
         self.ax.set_facecolor('#f8f8f8')
         self.ax.set_xlabel('X (m)', fontsize=20)
@@ -386,7 +399,7 @@ class TwoCarrierEnv(gym.Env):
         self.first_render = True
 
     def _render_frame(self):
-        """重构帧渲染，完全遵循参考代码的坐标变换与可视化逻辑"""
+        """重构帧渲染，完全遵循参考代码的坐标变换与可视化逻辑（新增内存优化）"""
         # 初始化可视化（若未初始化）
         if self.fig is None or self.ax is None:
             self._reset_visualization()
@@ -459,7 +472,7 @@ class TwoCarrierEnv(gym.Env):
             for i, poly in enumerate(car_polygons):
                 h = Polygon(
                     poly,
-                    zorder=2.3,
+                    zorder=2.5,
                     alpha=self.model.config['alpha_c'],
                     fc=self.model.config['fc_c'][i],
                     ec='black',
@@ -529,25 +542,171 @@ class TwoCarrierEnv(gym.Env):
         # 6. 刷新画布（高效刷新）
         self.fig.canvas.draw_idle()
 
-        # 7. rgb_array模式下保存帧（保持原有逻辑）
+        # 7. rgb_array模式下保存帧（优化内存+资源释放）
         if self.render_mode == "rgb_array":
+            frame = None
+            buf = None
+            img = None
             try:
                 buf = BytesIO()
-                self.fig.savefig(buf, format='png', bbox_inches='tight', dpi=150, facecolor=self.fig.get_facecolor())
+                self.fig.savefig(
+                    buf,
+                    format='png',
+                    bbox_inches='tight',
+                    dpi=96,
+                    facecolor=self.fig.get_facecolor()
+                )
                 buf.seek(0)
                 img = Image.open(buf).convert('RGB')
-                frame = np.array(img)
-                # 校验帧尺寸一致性
+                frame = np.array(img, dtype=np.uint8)  # 新增：指定dtype，避免高内存占用的浮点型数组
+
+                # 校验帧尺寸一致性（优化插值方法，减少内存占用）
                 if len(self.render_frames) > 0:
                     ref_shape = self.render_frames[0].shape
                     if frame.shape != ref_shape:
-                        frame = cv2.resize(frame, (ref_shape[1], ref_shape[0]))
+                        # 使用INTER_AREA插值，更适合缩小/放大，内存占用更低
+                        frame = cv2.resize(
+                            frame,
+                            (ref_shape[1], ref_shape[0]),
+                            interpolation=cv2.INTER_AREA
+                        )
+
+                # 核心优化：限制帧缓存上限，避免内存溢出
+                max_cache_frames = 800  # 可按需调整，超过则丢弃最早帧
+                if len(self.render_frames) >= max_cache_frames:
+                    self.render_frames.pop(0)  # 丢弃最早帧，保持缓存容量稳定
                 self.render_frames.append(frame)
-                buf.close()
                 return frame
             except Exception as e:
                 print(f"帧保存失败，错误：{type(e).__name__}: {e}")
+            finally:
+                # 关键：显式释放资源，避免内存泄漏
+                if buf is not None:
+                    buf.close()
+                if img is not None:
+                    del img
+                if buf is not None:
+                    del buf
+            return frame
 
+    def save_eval_video(self, eval_round=None, video_save_dir=None):
+        """
+        手动保存单轮评测的仿真视频（基于当前render_frames中的帧）
+        优化：分批写入帧+健壮编码器兼容+内存释放
+        :param eval_round: 评测轮次（用于文件名区分）
+        :param video_save_dir: 视频保存目录（默认沿用原有./output）
+        :return: 保存的视频文件路径（失败返回None）
+        """
+        # 前置校验：可视化启用、rgb_array模式、帧列表非空
+        if not self.enable_visualization or self.render_mode != "rgb_array" or len(self.render_frames) == 0:
+            print("警告：不满足视频保存条件（可视化未启用/非rgb_array模式/无有效帧）")
+            return None
+        
+        out = None
+        try:
+            # 1. 配置视频保存目录（保持原有逻辑）
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            if video_save_dir is None:
+                # 优先使用Checkpoint目录（需与cfg.checkpoint.checkpoint_dir对齐）
+                default_ckpt_dir = os.path.join(current_dir, "checkpoints")
+                video_save_dir = default_ckpt_dir if os.path.exists(default_ckpt_dir) else os.path.join(current_dir, "output")
+            os.makedirs(video_save_dir, exist_ok=True)
+            
+            # 2. 生成带评测轮次的文件名（保持原有命名逻辑）
+            time_str = datetime.datetime.now().strftime('%y%m%d%H%M%S')
+            if eval_round is not None:
+                file_prefix = f"{self.config_name}_eval_round_{eval_round}"
+            else:
+                file_prefix = f"{self.config_name}_vis"
+            file_name = f"{file_prefix}_{time_str}.mp4"
+            video_path = os.path.join(video_save_dir, file_name)
+            
+            # 3. 视频合成核心逻辑（优化编码器兼容+分批写入）
+            fps = self.metadata['render_fps']
+            height, width, _ = self.render_frames[0].shape
+            video_writer_opened = False
+            
+            # 第一步：尝试MP4格式（mp4v编码器）
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+            if out.isOpened():
+                video_writer_opened = True
+            
+            # 第二步：MP4失败，切换AVI格式（XVID编码器，兼容性最强）
+            if not video_writer_opened:
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                video_path = video_path.replace(".mp4", ".avi")
+                out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+                if out.isOpened():
+                    video_writer_opened = True
+                    print(f"mp4格式不支持，切换为avi格式，保存路径：{video_path}")
+                else:
+                    raise RuntimeError("MP4和AVI格式均无法初始化VideoWriter，编码器缺失或内存不足")
+            
+            # 4. 分批写入帧（核心优化：减少单次内存占用）
+            batch_size = 60  # 每批写入60帧，写完释放批处理内存
+            total_frames = len(self.render_frames)
+            for i in range(0, total_frames, batch_size):
+                # 提取当前批次帧
+                batch_frames = self.render_frames[i:i+batch_size]
+                for frame in batch_frames:
+                    # 格式转换（保持原有逻辑，显式指定dtype减少内存）
+                    bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR).astype(np.uint8)
+                    out.write(bgr_frame)
+                
+                # 打印进度（保持原有逻辑）
+                current_written = min(i + batch_size, total_frames)
+                if current_written % 100 == 0:
+                    print(f"  已写入 {current_written}/{total_frames} 帧")
+                
+                # 显式释放批处理帧内存
+                del batch_frames
+            
+            # 5. 释放资源并打印结果
+            out.release()
+            out = None
+            print(f"单轮评测视频已成功保存至: {video_path}")
+            return video_path
+        
+        except Exception as e:
+            # 清理残留的VideoWriter资源
+            if out is not None and out.isOpened():
+                out.release()
+            out = None
+            print(f"生成单轮评测视频失败，详细错误信息：{type(e).__name__}: {e}")
+            
+            # 备选：保存关键帧（优化压缩，减少内存占用）
+            try:
+                key_frame_dir = os.path.join(video_save_dir or os.path.join(current_dir, "output"), "key_frames")
+                os.makedirs(key_frame_dir, exist_ok=True)
+                
+                # 优化：每10帧保存1张，增加PNG压缩参数
+                key_frame_interval = 10
+                key_frames = self.render_frames[::key_frame_interval]
+                for i, frame in enumerate(key_frames):
+                    img_name = f"eval_round_{eval_round or 'unknown'}_frame_{i:03d}.png"
+                    img_path = os.path.join(key_frame_dir, img_name)
+                    # 格式转换+压缩保存，减少磁盘占用和内存消耗
+                    bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(
+                        img_path,
+                        bgr_frame,
+                        [cv2.IMWRITE_PNG_COMPRESSION, 6]  # PNG压缩级别（0-9），6为平衡值
+                    )
+                
+                print(f"已保存关键帧至: {key_frame_dir}，共保存 {len(key_frames)} 张")
+            except Exception as e2:
+                print(f"保存关键帧也失败，错误：{type(e2).__name__}: {e2}")
+            return None
+        finally:
+            # 最终兜底：释放VideoWriter资源
+            if out is not None and out.isOpened():
+                out.release()
+    
+    def clear_render_frames(self):
+        if hasattr(self, 'render_frames'):
+            self.render_frames = []
+    
     def close(self):
         """关闭环境并生成视频"""
         # 新增：打印关键状态，确认帧列表和渲染模式
@@ -615,16 +774,16 @@ class TwoCarrierEnv(gym.Env):
 # 注册环境（导入时自动注册）
 gym.register(
     id="TwoCarrierEnv-v0",
-    entry_point=TwoCarrierEnv,
+    entry_point="occt_2d2c:TwoCarrierEnv",
     max_episode_steps=1000,
-    kwargs={"enable_visualization": False}  # 添加默认参数
+    kwargs={}  # 预留参数
 )
 
 # 测试代码
 if __name__ == "__main__":
     # ===================== 配置调整（便于测试扰动功能） =====================
     RENDER_MODE = "rgb_array"  # 可选"human"（可视化）或"rgb_array"（保存视频）
-    ENABLE_VISUALIZATION = False  # 测试扰动时建议先关闭，避免卡顿；验证可视化时再开启
+    ENABLE_VISUALIZATION = True  # 测试扰动时建议先关闭，避免卡顿；验证可视化时再开启
     TEST_STEPS = 500  # 测试步数（无需跑满1000步，足够验证扰动即可）
     SEED = 42  # 固定种子，保证扰动测试可复现
     

@@ -6,6 +6,7 @@ env:
 collector:
   frames_per_batch: 2048
   total_frames: 1024_000
+  num_workers: 4
 
 # logger
 logger:
@@ -13,9 +14,11 @@ logger:
   project_name: torchrl_example_ppo
   group_name: null
   exp_name: OCCT_PPO_experiment
-  test_interval: 102_40
-  num_test_episodes: 5
+  test_interval: 10240
+  num_test_episodes: 3
   video: False
+  log_interval: 2048
+  save_train_metrics: True
 
 # Optim
 optim:

@@ -146,16 +146,19 @@ def main(cfg: DictConfig):
                 or f"swanlab_{cfg.env.scenario_name}",
             },
         )
-        logger_video = cfg.logger.video
+        logger_video = False
     else:
         logger_video = False
 
     # Create test environment
-    test_env = make_env(cfg.env.env_name, device, from_pixels=logger_video)  # 测试环境：单独创建用于评估策略性能，支持视频录制
-    if logger_video:
-        test_env = test_env.append_transform(
-            VideoRecorder(logger, tag="rendering/test", in_keys=["pixels"])
-        )
+    # 1. 传递可视化参数给make_env
+    test_env = make_env(
+        cfg.env.env_name, 
+        device, 
+        from_pixels=logger_video,
+        render_mode="rgb_array",  # 开启自定义rgb_array渲染模式
+        enable_visualization=True  # 开启自定义可视化功能
+    )
     test_env.eval()
 
     def update(batch, num_network_updates):
@@ -205,6 +208,8 @@ def main(cfg: DictConfig):
         dynamic_ncols=True
     )
 
+    eval_round_counter = 0  # 初始化评测轮次，每次触发评测自增
+
     # extract cfg variables
     cfg_loss_ppo_epochs = cfg.loss.ppo_epochs
     cfg_optim_anneal_lr = cfg.optim.anneal_lr
@@ -215,7 +220,7 @@ def main(cfg: DictConfig):
     cfg_logger_num_test_episodes = cfg.logger.num_test_episodes
     losses = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
 
-    # ===================== 替换：手动保存Checkpoint（删除原回调逻辑）=====================
+    # ===================== 替换：手动保存Checkpoint =====================
     def save_checkpoint(current_frames):
         """封装Checkpoint保存逻辑，适配cfg配置"""
         ckpt_dict = {
@@ -225,7 +230,6 @@ def main(cfg: DictConfig):
             "cfg": cfg,
             "collected_frames": current_frames,
         }
-        # 修正：使用cfg.checkpoint.checkpoint_dir（与你的配置文件对齐，替换原save_prefix）
         save_dir = cfg.checkpoint.checkpoint_dir
         os.makedirs(save_dir, exist_ok=True)
         save_path = os.path.join(save_dir, f"checkpoint_{current_frames}_frames.pt")
@@ -314,16 +318,60 @@ def main(cfg: DictConfig):
             if ((i - 1) * frames_in_batch) // cfg_logger_test_interval < (
                 i * frames_in_batch
             ) // cfg_logger_test_interval:
+                eval_round_counter += 1  # 自增评测轮次
                 actor.eval()
+                print(f"\n============= 开始第 {eval_round_counter} 轮评测 =============")
+                
+                # 1. 执行原有评测逻辑
                 test_rewards = eval_model(
-                    actor, test_env, num_episodes=cfg_logger_num_test_episodes
+                    actor, test_env, num_episodes=cfg_logger_num_test_episodes, eval_round=eval_round_counter
                 )
+                
+                # 2. 解除环境包装，获取原始TwoCarrierEnv实例
+                try:
+                    raw_test_env = test_env.unwrapped
+                    while not isinstance(raw_test_env, TwoCarrierEnv):
+                        raw_test_env = raw_test_env.unwrapped
+                except Exception as e:
+                    print(f"获取原始环境实例失败，无法保存/上传视频：{e}")
+                    raw_test_env = None
+                
+                # 3. 调用自定义方法保存单轮评测视频
+                video_filepath = None
+                if raw_test_env is not None:
+                    # 保存视频（传入评测轮次，便于命名区分）
+                    video_filepath = raw_test_env.save_eval_video(
+                        eval_round=eval_round_counter,
+                        video_save_dir=cfg.checkpoint.checkpoint_dir
+                    )
+                    # 清空帧列表，为下一轮评测做准备
+                    raw_test_env.clear_render_frames()
+                    # 标记仿真结束，避免reset清空帧列表（可选）
+                    raw_test_env.mark_sim_finished()
+                
+                # 4. 更新评测指标（保留原有奖励记录）
                 metrics_to_log.update(
                     {
                         "eval/reward": test_rewards.mean(),
+                        "eval/round": eval_round_counter,
                     }
                 )
+                
+                # 5. 复用swanlab.py，将本地视频上传到SwanLab日志（核心复用点）
+                if logger and video_filepath is not None and os.path.exists(video_filepath):
+                    # 构造视频日志名称
+                    video_log_name = f"eval_video/round_{eval_round_counter}"
+                    # 调用修正后的swanlab.log_video（或直接调用swanlab.log）
+                    # 复用SwanLabLogger的log_video方法（已修正）
+                    logger.log_video(
+                        name=video_log_name,
+                        video_path=video_filepath,
+                        step=collected_frames  # 关联训练累计帧数，便于日志对齐
+                    )
+                    print(f"第 {eval_round_counter} 轮评测视频已上传至SwanLab日志")
+                
                 actor.train()
+                print(f"============= 第 {eval_round_counter} 轮评测结束 =============")
 
         if logger:
             metrics_to_log.update(timeit.todict(prefix="time"))

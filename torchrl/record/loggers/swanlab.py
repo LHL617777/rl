@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Sequence
 from typing import Any
-
+import os
 import torch
 import swanlab
 from omegaconf import DictConfig
@@ -76,25 +76,26 @@ class SwanLabLogger(Logger):
             swanlab.log({name: value}, step=step)
         else:
             swanlab.log({name: value})
-    def log_video(self, name: str, video: torch.Tensor, **kwargs) -> None:
-        """Log videos inputs to wandb.
-
-        Args:
-            name (str): The name of the video.
-            video (Tensor): The video to be logged.
-            **kwargs: Other keyword arguments. By construction, log_video
-                supports 'step' (integer indicating the step index), 'format'
-                (default is 'mp4') and 'fps' (defaults to ``self.video_fps``). Other kwargs are
-                passed as-is to the :obj:`experiment.log` method.
+    
+    def log_video(self, name: str, video_path: str, step: int | None = None, **kwargs) -> None:
         """
-        import wandb
-        fps = kwargs.pop("fps", self.video_fps)
-        wandb_video = wandb.Video(video, fps=fps, format='gif')
-        log_data = {name: swanlab.Video(wandb_video._path)}
-        self.experiment.log(
-            {name: log_data},
-            **kwargs,
-        )
+        修正：支持本地视频文件直接上传到SwanLab（去除wandb依赖）
+        Args:
+            name: 视频在SwanLab中的日志名称
+            video_path: 本地视频文件的完整路径（.mp4/.avi）
+            step: 日志记录步骤（对应训练的累计帧数/评测轮次）
+            **kwargs: 额外传递给swanlab.log的参数
+        """
+        if not os.path.exists(video_path):
+            warnings.warn(f"本地视频文件不存在，无法上传：{video_path}")
+            return
+        
+        # 复用swanlab.Video原生功能，直接传入本地文件路径
+        log_data = {name: swanlab.Video(video_path)}
+        if step is not None:
+            swanlab.log(log_data, step=step, **kwargs)
+        else:
+            swanlab.log(log_data, **kwargs)
     
     def log_hparams(self, cfg: DictConfig | dict) -> None:
         """Logs hyperparameters.
