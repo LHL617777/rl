@@ -49,6 +49,7 @@ def make_env(
         env_name=env_name,  # 保留传env_name字符串的习惯
         from_pixels=from_pixels,
         pixels_only=False,
+        device=device,
         **gymnasium_kwargs  # 解包传递自定义参数，无gym_kwargs顶层参数
     )
     
@@ -60,6 +61,7 @@ def make_env(
     env.append_transform(StepCounter())
     env.append_transform(DoubleToFloat(in_keys=["observation"]))
     
+    env = env.to(device)
     return env
 
 
