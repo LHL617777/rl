@@ -15,7 +15,7 @@ logger:
   group_name: null
   exp_name: OCCT_PPO_experiment
   test_interval: 10240
-  num_test_episodes: 3
+  num_test_episodes: 5
   video: False
   log_interval: 2048
   save_train_metrics: True

@@ -199,17 +199,17 @@ def eval_model(actor, test_env, num_episodes=3, eval_round=None):
         reward = td_test["next", "episode_reward"][td_test["next", "done"]]
         test_rewards.append(reward.cpu())
         
-        # 步骤3：自定义视频生成（每 episode 结束后保存独立视频，保持原有逻辑）
-        if raw_test_env is not None and raw_test_env.enable_visualization and raw_test_env.render_mode == "rgb_array":
-            # 构造视频命名标识（评测轮次+episode 索引，避免重名）
-            video_identifier = f"{eval_round or 'unknown'}_episode_{episode_idx+1}"
-            # 保存该 episode 的独立视频（基于当前缓存的 render_frames）
-            video_filepath = raw_test_env.save_eval_video(
-                eval_round=video_identifier,
-                video_save_dir=getattr(raw_test_env, "checkpoint_dir", None)
-            )
-            # 关键适配：视频保存后，手动清空帧列表（实现帧隔离，避免叠加到下一个 episode）
-            raw_test_env.clear_render_frames()
+        # # 步骤3：自定义视频生成（每 episode 结束后保存独立视频，保持原有逻辑）
+        # if raw_test_env is not None and raw_test_env.enable_visualization and raw_test_env.render_mode == "rgb_array":
+        #     # 构造视频命名标识（评测轮次+episode 索引，避免重名）
+        #     video_identifier = f"{eval_round or 'unknown'}_episode_{episode_idx+1}"
+        #     # 保存该 episode 的独立视频（基于当前缓存的 render_frames）
+        #     video_filepath = raw_test_env.save_eval_video(
+        #         eval_round=video_identifier,
+        #         video_save_dir=getattr(raw_test_env, "checkpoint_dir", None)
+        #     )
+        #     # 关键适配：视频保存后，手动清空帧列表（实现帧隔离，避免叠加到下一个 episode）
+        #     raw_test_env.clear_render_frames()
         
         # 步骤4：释放 td_test 内存，避免内存泄漏（不变）
         del td_test

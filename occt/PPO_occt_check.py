@@ -156,8 +156,8 @@ def main(cfg: DictConfig):
         cfg.env.env_name, 
         device, 
         from_pixels=logger_video,
-        render_mode="rgb_array",  # 开启自定义rgb_array渲染模式
-        enable_visualization=True  # 开启自定义可视化功能
+        render_mode=None,  # 自定义rgb_array渲染模式
+        enable_visualization=False  # 自定义可视化功能
     )
     test_env.eval()
 
@@ -327,27 +327,27 @@ def main(cfg: DictConfig):
                     actor, test_env, num_episodes=cfg_logger_num_test_episodes, eval_round=eval_round_counter
                 )
                 
-                # 2. 解除环境包装，获取原始TwoCarrierEnv实例
-                try:
-                    raw_test_env = test_env.unwrapped
-                    while not isinstance(raw_test_env, TwoCarrierEnv):
-                        raw_test_env = raw_test_env.unwrapped
-                except Exception as e:
-                    print(f"获取原始环境实例失败，无法保存/上传视频：{e}")
-                    raw_test_env = None
+                # # 2. 解除环境包装，获取原始TwoCarrierEnv实例
+                # try:
+                #     raw_test_env = test_env.unwrapped
+                #     while not isinstance(raw_test_env, TwoCarrierEnv):
+                #         raw_test_env = raw_test_env.unwrapped
+                # except Exception as e:
+                #     print(f"获取原始环境实例失败，无法保存/上传视频：{e}")
+                #     raw_test_env = None
                 
-                # 3. 调用自定义方法保存单轮评测视频
-                video_filepath = None
-                if raw_test_env is not None:
-                    # 保存视频（传入评测轮次，便于命名区分）
-                    video_filepath = raw_test_env.save_eval_video(
-                        eval_round=eval_round_counter,
-                        video_save_dir=cfg.checkpoint.checkpoint_dir
-                    )
-                    # 清空帧列表，为下一轮评测做准备
-                    raw_test_env.clear_render_frames()
-                    # 标记仿真结束，避免reset清空帧列表（可选）
-                    raw_test_env.mark_sim_finished()
+                # # 3. 调用自定义方法保存单轮评测视频
+                # video_filepath = None
+                # if raw_test_env is not None:
+                #     # 保存视频（传入评测轮次，便于命名区分）
+                #     video_filepath = raw_test_env.save_eval_video(
+                #         eval_round=eval_round_counter,
+                #         video_save_dir=cfg.checkpoint.checkpoint_dir
+                #     )
+                #     # 清空帧列表，为下一轮评测做准备
+                #     raw_test_env.clear_render_frames()
+                #     # 标记仿真结束，避免reset清空帧列表（可选）
+                #     raw_test_env.mark_sim_finished()
                 
                 # 4. 更新评测指标（保留原有奖励记录）
                 metrics_to_log.update(
@@ -357,18 +357,18 @@ def main(cfg: DictConfig):
                     }
                 )
                 
-                # 5. 复用swanlab.py，将本地视频上传到SwanLab日志（核心复用点）
-                if logger and video_filepath is not None and os.path.exists(video_filepath):
-                    # 构造视频日志名称
-                    video_log_name = f"eval_video/round_{eval_round_counter}"
-                    # 调用修正后的swanlab.log_video（或直接调用swanlab.log）
-                    # 复用SwanLabLogger的log_video方法（已修正）
-                    logger.log_video(
-                        name=video_log_name,
-                        video_path=video_filepath,
-                        step=collected_frames  # 关联训练累计帧数，便于日志对齐
-                    )
-                    print(f"第 {eval_round_counter} 轮评测视频已上传至SwanLab日志")
+                # # 5. 复用swanlab.py，将本地视频上传到SwanLab日志（核心复用点）
+                # if logger and video_filepath is not None and os.path.exists(video_filepath):
+                #     # 构造视频日志名称
+                #     video_log_name = f"eval_video/round_{eval_round_counter}"
+                #     # 调用修正后的swanlab.log_video（或直接调用swanlab.log）
+                #     # 复用SwanLabLogger的log_video方法（已修正）
+                #     logger.log_video(
+                #         name=video_log_name,
+                #         video_path=video_filepath,
+                #         step=collected_frames  # 关联训练累计帧数，便于日志对齐
+                #     )
+                #     print(f"第 {eval_round_counter} 轮评测视频已上传至SwanLab日志")
                 
                 actor.train()
                 print(f"============= 第 {eval_round_counter} 轮评测结束 =============")
