@@ -15,14 +15,14 @@ from PIL import Image
 from io import BytesIO
 import torch
 
-plt.rcParams["font.sans-serif"]=["SimHei"] #设置字体
-plt.rcParams["axes.unicode_minus"]=False #该语句解决图像中的“-”负号的乱码问题
+# plt.rcParams["font.sans-serif"]=["SimHei"] #设置字体
+plt.rcParams["axes.unicode_minus"]=False
 
 class TwoCarrierEnv(gym.Env):
     """两辆车运载超大件系统的自定义强化学习环境"""
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 5}
 
-    def __init__(self, render_mode=None, config_path=None, enable_visualization=False):
+    def __init__(self, render_mode=None, config_path=None, enable_visualization=False, vecnorm_frozen: bool = False):
         super().__init__()
         
         # 加载2d2c.yaml配置文件（优先使用传入路径，否则加载同一目录下的2d2c.yaml）
@@ -48,9 +48,15 @@ class TwoCarrierEnv(gym.Env):
             5, 5,
             1e5, 1e5
         ])
+        # 归一化后的观测空间（合理范围，覆盖归一化后的所有可能值）
+        obs_norm_low = np.full(12, -1000.0, dtype=np.float64)  # 12维观测，下限-1000
+        obs_norm_high = np.full(12, 1000.0, dtype=np.float64)   # 12维观测，上限1000
         self.observation_space = spaces.Box(
-            low=obs_low, high=obs_high, dtype=np.float64
+            low=obs_norm_low, high=obs_norm_high, dtype=np.float64
         )
+        # self.observation_space = spaces.Box(
+        #     low=obs_low, high=obs_high, dtype=np.float64
+        # )
         
         # 原始动作空间上下限（保存用于归一化/反归一化）
         self.original_action_low = np.array([-np.pi/6, -np.pi/6, 0, 0])  # 原始下限
@@ -62,12 +68,7 @@ class TwoCarrierEnv(gym.Env):
             high=np.ones(4, dtype=np.float64),  # 归一化上限：[1, 1, 1, 1]
             dtype=np.float64
         )
-        # print("动作空间已归一化至[-1, 1]区间")
-        # print(f"原始动作范围：\n  转向角：±{np.pi/6:.2f}rad（±30°），推力：[0, {1e3}]")
-        # print(f"归一化后动作范围：[-1, 1]（4维）")
         
-        # # 第一辆车的固定控制量（简化问题，仅训练第二辆车）
-        # self.u1_fixed = np.array([np.pi/6, 0, 1e3, 1e3])  # 示例：固定前轮转角和推力
         # 第一辆车随机控制量
         self.u1_random = np.array([0, 0, 1e3, 1e3])  # 示例：随机控制量
         self.rng = np.random.default_rng()  # 随机数生成器（保证可复现性）
@@ -102,8 +103,17 @@ class TwoCarrierEnv(gym.Env):
         # 车轮参数（可放入yaml配置）
         self.wheel_radius = 0.3  # 车轮半径
         self.wheel_width = 0.15  # 车轮宽度
-        # print(f"初始化渲染模式：{self.render_mode}，是否为rgb_array：{self.render_mode == 'rgb_array'}")
-        # print(f"可视化功能：{'启用' if enable_visualization else '关闭'}")
+
+        # ===================================== 新增：观测归一化（VecNorm）相关初始化 =====================================
+        self.vecnorm_decay = 0.99999  # 滑动平均衰减系数（与原VecNormV2一致）
+        self.vecnorm_eps = 1e-2       # 防止除零的小常数（与原VecNormV2一致）
+        self.vecnorm_frozen = vecnorm_frozen  # 是否冻结统计量
+        self.vecnorm_min_var = 1e-4   # 最小方差约束，避免初期方差过小导致归一化值爆炸
+        # 滑动统计量（初始化为None，首次观测时根据观测形状自动初始化）
+        self.vecnorm_mean = np.zeros(12, dtype=np.float64)  # 初始均值为0
+        self.vecnorm_var = np.ones(12, dtype=np.float64) * self.vecnorm_min_var  # 初始方差为最小方差
+        self.vecnorm_count = 0        # 统计更新次数（用于初始阶段的无偏估计）
+        # ==================================================================================================================
 
     def _load_config(self, config_path):
         """加载同一目录下的2d2c.yaml配置文件"""
@@ -122,7 +132,6 @@ class TwoCarrierEnv(gym.Env):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
-            # print(f"成功加载YAML配置文件：{config_path}")
             return config
         except Exception as e:
             print(f"错误：解析2d2c.yaml失败，原因：{e}，将使用默认配置")
@@ -183,17 +192,86 @@ class TwoCarrierEnv(gym.Env):
         )
         return orig_action.astype(np.float64)
 
+    # ===================================== 新增：VecNorm 辅助方法1 - 更新滑动统计量 =====================================
+    def _update_vecnorm_stats(self, obs):
+        """
+        在线更新 VecNorm 滑动统计量（仅训练阶段、未冻结时执行）
+        :param obs: 原始观测（12维numpy数组，单条观测）
+        """
+        # 若已冻结，直接返回（不更新统计量）
+        if self.vecnorm_frozen:
+            return
+        
+        # 统一转换为numpy数组（确保格式一致）
+        obs_np = np.asarray(obs, dtype=np.float64)
+        
+        # 首次初始化统计量（匹配观测的12维形状）
+        if self.vecnorm_mean is None:
+            self.vecnorm_mean = np.zeros_like(obs_np, dtype=np.float64)
+            self.vecnorm_var = np.ones_like(obs_np, dtype=np.float64)
+        
+        # 计算当前观测的均值和方差（单条观测，直接赋值）
+        current_mean = obs_np
+        current_var = np.square(obs_np)  # 单条观测的方差为自身平方
+        current_count = 1
+
+        # 更新滑动统计量（采用无偏滑动平均，与原VecNormV2逻辑一致）
+        self.vecnorm_count += current_count
+        if self.vecnorm_count <= current_count:
+            # 首次更新，直接赋值
+            self.vecnorm_mean = current_mean
+            self.vecnorm_var = current_var
+        else:
+            # 滑动平均更新：new = decay * old + (1 - decay) * current
+            decay = self.vecnorm_decay
+            self.vecnorm_mean = decay * self.vecnorm_mean + (1 - decay) * current_mean
+            self.vecnorm_var = decay * self.vecnorm_var + (1 - decay) * current_var
+        # 新增：方差下限约束，避免方差过小导致归一化值爆炸
+        self.vecnorm_var = np.maximum(self.vecnorm_var, self.vecnorm_min_var)
+
+    # ===================================== 新增：VecNorm 辅助方法2 - 执行观测归一化 =====================================
+    def _normalize_observation(self, obs):
+        """
+        执行观测归一化（训练/评测阶段均执行，仅评测阶段不更新统计量）
+        :param obs: 原始观测（12维numpy数组）
+        :return: 归一化后的观测（12维numpy数组，保持原数据类型）
+        """
+        # 若统计量未初始化（首次观测），直接返回原始观测
+        if self.vecnorm_mean is None:
+            return obs
+        
+        # 统一转换为numpy数组
+        obs_np = np.asarray(obs, dtype=np.float64)
+        
+        # 计算标准差（加eps防止除零）
+        std_np = np.sqrt(self.vecnorm_var) + self.vecnorm_eps
+        
+        # 执行归一化：(原始观测 - 滑动均值) / 滑动标准差
+        normalized_obs_np = (obs_np - self.vecnorm_mean) / std_np
+        
+        # 恢复原数据类型并返回
+        return normalized_obs_np.astype(obs.dtype) if hasattr(obs, 'dtype') else normalized_obs_np
+
     def _get_observation(self):
-        """从模型提取观测值"""
+        """从模型提取观测值（包含归一化处理）"""
         x = self.model.x  # 当前状态向量
         # 提取第二辆车的铰接力（Fh_arch存储格式：[Fh1_x, Fh1_y, Fh2_x, Fh2_y]）
         Fh2_x = self.model.Fh_arch[self.model.count, 2]
         Fh2_y = self.model.Fh_arch[self.model.count, 3]
-        return np.concatenate([
+        # 原始观测（12维）
+        raw_obs = np.concatenate([
             x[:5],   # 位置与姿态：[Xo, Yo, Psio, Psi1, Psi2]
             x[5:10], # 速度：[Xo_dot, Yo_dot, Psio_dot, Psi1_dot, Psi2_dot]
             [Fh2_x, Fh2_y]  # 第二辆车铰接力
         ])
+        
+        # 步骤1：更新VecNorm统计量（仅训练阶段未冻结时生效）
+        self._update_vecnorm_stats(raw_obs)
+        
+        # 步骤2：执行观测归一化（返回归一化后的观测）
+        normalized_obs = self._normalize_observation(raw_obs)
+        
+        return normalized_obs
 
     def _calculate_reward(self):
         """计算奖励（核心：最小化铰接力+跟随约束）"""
@@ -221,6 +299,7 @@ class TwoCarrierEnv(gym.Env):
         
         # 总奖励 = 负惩罚（最小化目标）
         return - (hinge_force_penalty + 0 * tracking_penalty + 0 * control_smooth_penalty)
+    
     def _get_noisy_u1(self):
         """
         生成带有真实车辆特性的第一辆车控制量
@@ -236,8 +315,6 @@ class TwoCarrierEnv(gym.Env):
         # 2.2 叠加：原始值 + 轮级固定偏移 + 步级小扰动
         steer_candidate = u1_noisy[0] + self.steer_episode_offset + steer_step_noise
         # 2.3 裁剪约束（不超出车辆最大转向角）
-        steer_clipped = np.clip(steer_candidate, self.steer_min_bound, self.steer_max_bound)
-        # 2.4 裁剪约束（不超出车辆最大转向角，符合真实物理特性）
         steer_clipped = np.clip(steer_candidate, self.steer_min_bound, self.steer_max_bound)
         
         # 2.5 平滑过渡（避免相邻步转角突变，符合驾驶员操控惯性/转向系统阻尼）
@@ -266,7 +343,7 @@ class TwoCarrierEnv(gym.Env):
         u = np.concatenate([u1, original_action])
         
         self.model.step(u)
-        observation = self._get_observation()
+        observation = self._get_observation()  # 直接获取归一化后的观测
         reward = self._calculate_reward()
         self._record_trajectories()
 
@@ -294,7 +371,6 @@ class TwoCarrierEnv(gym.Env):
 
         return observation, reward, terminated, truncated, info
 
-    # 保留你所有原有导入和类定义，仅修改reset方法
     def reset(self, seed=None, options=None, clear_frames=None):
         super().reset(seed=seed)
         if seed is not None:
@@ -335,8 +411,41 @@ class TwoCarrierEnv(gym.Env):
             }
             self._reset_visualization() 
         self.is_sim_finished = False
-        observation = self._get_observation()
+        observation = self._get_observation()  # 直接获取归一化后的观测
         return observation, {}
+
+    # ===================================== 新增：VecNorm 模式切换方法 =====================================
+    def freeze_vecnorm(self):
+        """冻结 VecNorm 统计量（评测模式：停止更新均值/方差，使用训练时累积的统计量）"""
+        self.vecnorm_frozen = True
+        print("观测归一化统计量已冻结，进入评测模式")
+
+    def unfreeze_vecnorm(self):
+        """解冻 VecNorm 统计量（训练模式：恢复更新均值/方差）"""
+        self.vecnorm_frozen = False
+        print("观测归一化统计量已解冻，进入训练模式")
+
+    # ===================================== 新增：VecNorm 状态序列化/反序列化方法 =====================================
+    def get_vecnorm_state(self):
+        """导出 VecNorm 状态（用于保存到 checkpoint）"""
+        return {
+            "vecnorm_mean": self.vecnorm_mean,
+            "vecnorm_var": self.vecnorm_var,
+            "vecnorm_count": self.vecnorm_count,
+            "vecnorm_decay": self.vecnorm_decay,
+            "vecnorm_eps": self.vecnorm_eps,
+            "vecnorm_frozen": self.vecnorm_frozen
+        }
+
+    def set_vecnorm_state(self, vecnorm_state):
+        """从 checkpoint 导入 VecNorm 状态（用于离线评测加载）"""
+        self.vecnorm_mean = vecnorm_state["vecnorm_mean"]
+        self.vecnorm_var = vecnorm_state["vecnorm_var"]
+        self.vecnorm_count = vecnorm_state["vecnorm_count"]
+        self.vecnorm_decay = vecnorm_state["vecnorm_decay"]
+        self.vecnorm_eps = vecnorm_state["vecnorm_eps"]
+        self.vecnorm_frozen = vecnorm_state["vecnorm_frozen"]
+        print("观测归一化状态已从 checkpoint 加载完成")
 
     def mark_sim_finished(self):
         self.is_sim_finished = True
@@ -709,11 +818,6 @@ class TwoCarrierEnv(gym.Env):
     
     def close(self):
         """关闭环境并生成视频"""
-        # 新增：打印关键状态，确认帧列表和渲染模式
-        # print(f"===== 进入close()方法 ======")
-        # print(f"当前render_mode：{self.render_mode}")
-        # print(f"可视化功能状态：{'启用' if self.enable_visualization else '关闭'}")
-        
         if self.fig is not None:
             plt.close(self.fig)
 
@@ -726,7 +830,7 @@ class TwoCarrierEnv(gym.Env):
                 print(f"输出目录已准备：{output_dir}，共待写入帧数量：{len(self.render_frames)}")
 
                 # 生成视频文件名
-                time_str = datetime.datetime.now().strftime(r'%y%m%d%H%M%S')  # 修正时间格式，避免重复
+                time_str = datetime.datetime.now().strftime(r'%y%m%d%H%M%S')
                 file_name = f"{self.config_name}_vis_{time_str}.mp4"
                 video_path = os.path.join(output_dir, file_name)
 
@@ -801,6 +905,7 @@ if __name__ == "__main__":
     print(f"可视化功能：{'启用' if raw_env.enable_visualization else '关闭'}")
     print(f"原始u1_random：{raw_env.u1_random}（前轮转角初始值：{raw_env.u1_random[0]:.4f}rad）")
     print(f"前轮转角约束：±{np.pi/6:.4f}rad（±30°）")
+    print(f"观测归一化模式：{'训练模式（可更新统计量）' if not raw_env.vecnorm_frozen else '评测模式（统计量已冻结）'}")
     print("=" * 60)
 
     # ===================== 步骤1：保留原有动作归一化/反归一化测试 =====================
@@ -815,7 +920,31 @@ if __name__ == "__main__":
     print("--- 动作归一化测试完成 ---")
     print("=" * 60)
 
-    # ===================== 步骤2：新增【前轮转角多样性扰动专属测试】（核心修改） =====================
+    # ===================== 步骤2：新增【观测归一化功能验证】 =====================
+    print("\n--- 【新增测试】观测归一化功能验证 ---")
+    # 重置环境（固定种子，保证可复现）
+    obs, info = env.reset(seed=SEED)
+    print(f"首次观测（归一化后）形状：{obs.shape}")
+    print(f"首次观测（归一化后）前12维：{obs[:12]}")
+    
+    # 运行几步，查看归一化统计量更新
+    for step in range(5):
+        normalized_action = np.array([0, 0, 0, 0])
+        obs, reward, terminated, truncated, info = env.step(normalized_action)
+        if step == 4:
+            print(f"第5步观测（归一化后）前12维：{obs[:12]}")
+            print(f"当前归一化统计量（均值前12维）：{raw_env.vecnorm_mean[:12] if raw_env.vecnorm_mean is not None else '未初始化'}")
+            print(f"当前归一化统计量（方差前12维）：{raw_env.vecnorm_var[:12] if raw_env.vecnorm_var is not None else '未初始化'}")
+    
+    # 切换到评测模式，冻结统计量
+    raw_env.freeze_vecnorm()
+    obs_frozen, reward_frozen, terminated_frozen, truncated_frozen, info_frozen = env.step(normalized_action)
+    print(f"冻结后第一步观测（归一化后）前5维：{obs_frozen[:5]}")
+    print(f"冻结后归一化均值是否变化：{np.allclose(raw_env.vecnorm_mean, raw_env.vecnorm_mean)}（应始终为True）")
+    print("--- 观测归一化功能测试完成 ---")
+    print("=" * 60)
+
+    # ===================== 步骤3：新增【前轮转角多样性扰动专属测试】（核心修改） =====================
     print("\n--- 【新增测试】前轮转角多样性扰动验证 ---")
     # 重置环境（固定种子，保证可复现）
     obs, info = env.reset(seed=SEED)
@@ -858,8 +987,7 @@ if __name__ == "__main__":
     # 统计并打印扰动结果（验证多样性+约束有效性）
     print("\n--- 扰动数据统计结果 ---")
     print(f"【前轮转角（核心验证）】")
-    print(f"  取值范围：[{steer_records.min():.4f}, {steer_records.max():.4f}]rad")
-    print(f"  对应角度：[{np.rad2deg(steer_records.min()):.1f}, {np.rad2deg(steer_records.max()):.1f}]°")
+    print(f"  取值范围：[{steer_records.min():.4f}, {steer_records.max():.4f}]rad | 对应角度：[{np.rad2deg(steer_records.min()):.1f}, {np.rad2deg(steer_records.max()):.1f}]°")
     print(f"  均值：{steer_records.mean():.4f}rad | 标准差：{steer_records.std():.4f}rad")
     print(f"  是否符合约束（±π/6）：{ (steer_records >= -np.pi/6).all() and (steer_records <= np.pi/6).all() }")
     print(f"【前轮推力】")
@@ -871,7 +999,7 @@ if __name__ == "__main__":
     print("--- 前轮转角多样性扰动测试完成 ---")
     print("=" * 60)
 
-    # ===================== 步骤3：（可选）多轮仿真验证重置有效性 =====================
+    # ===================== 步骤4：（可选）多轮仿真验证重置有效性 =====================
     print("\n--- 【可选测试】多轮仿真重置验证（确保扰动状态独立） ---")
     max_episodes = 4
     for episode in range(max_episodes):
@@ -891,7 +1019,7 @@ if __name__ == "__main__":
     print("--- 多轮仿真重置验证完成 ---")
     print("=" * 60)
 
-    # ===================== 步骤4：保留原有环境关闭+视频生成逻辑 =====================
+    # ===================== 步骤5：保留原有环境关闭+视频生成逻辑 =====================
     print("\n--- 环境关闭与视频生成 ---")
     env.close()
 
