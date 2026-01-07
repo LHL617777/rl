@@ -681,7 +681,7 @@ class TwoCarrierEnv(gym.Env):
                         )
 
                 # 核心优化：限制帧缓存上限，避免内存溢出
-                max_cache_frames = 800  # 可按需调整，超过则丢弃最早帧
+                max_cache_frames = 1001  # 可按需调整，超过则丢弃最早帧
                 if len(self.render_frames) >= max_cache_frames:
                     self.render_frames.pop(0)  # 丢弃最早帧，保持缓存容量稳定
                 self.render_frames.append(frame)
