@@ -114,6 +114,8 @@ class TwoCarrierEnv(gym.Env):
         self.vecnorm_var = np.ones(12, dtype=np.float64) * self.vecnorm_min_var  # 初始方差为最小方差
         self.vecnorm_count = 0        # 统计更新次数（用于初始阶段的无偏估计）
         # ==================================================================================================================
+        self.hinge_force_penalty = 0.0
+        self.control_smooth_penalty = 0.0
 
     def _load_config(self, config_path):
         """加载同一目录下的2d2c.yaml配置文件"""
@@ -293,12 +295,14 @@ class TwoCarrierEnv(gym.Env):
         if self.model.count > 0:
             u2_prev = self.model.u_arch[self.model.count - 1, 4:8]  # 上一步第二辆车控制量
             u2_current = self.model.u_arch[self.model.count, 4:8]
-            control_smooth_penalty = 0.1 * np.sum((u2_current - u2_prev)**2)
+            control_smooth_penalty = 5 * 1e-7 * np.sum((u2_current - u2_prev)**2)
         else:
             control_smooth_penalty = 0
         
+        self.hinge_force_penalty = hinge_force_penalty
+        self.control_smooth_penalty = control_smooth_penalty   
         # 总奖励 = 负惩罚（最小化目标）
-        return - (hinge_force_penalty + 0 * tracking_penalty + 0 * control_smooth_penalty)
+        return - (0.5 * hinge_force_penalty + 0 * tracking_penalty + 0.5 * control_smooth_penalty)
     
     def _get_noisy_u1(self):
         """
@@ -356,7 +360,9 @@ class TwoCarrierEnv(gym.Env):
         
         # 判断终止条件（仿真结束）
         terminated = self.model.is_finish
-        truncated = False  
+        truncated = False
+        X1, Y1 = self.model.getXYi(self.model.x, 0)  # 第一辆车位置
+        X2, Y2 = self.model.getXYi(self.model.x, 1)  
         info = {
             'Fh2': (self.model.Fh_arch[self.model.count, 2], 
                     self.model.Fh_arch[self.model.count, 3]),
@@ -366,7 +372,10 @@ class TwoCarrierEnv(gym.Env):
             ),
             'u1': u1,  # 新增：保存第一辆车控制量，用于可视化车轮摆角
             'u2_normalized': action,  # 归一化后的动作
-            'u2_original': original_action  # 原始动作（便于调试）
+            'u2_original': original_action,  # 原始动作（便于调试）
+            'x': np.array([X1, Y1, X2, Y2]),
+            "hinge_force_penalty": self.hinge_force_penalty,
+            "control_smooth_penalty": self.control_smooth_penalty
         }
 
         return observation, reward, terminated, truncated, info
