@@ -17,6 +17,7 @@ from torchrl.envs import (
 from torchrl.envs.libs.gym import GymEnv
 from torchrl.modules import MLP, ProbabilisticActor, TanhNormal, ValueOperator
 from torchrl.record import VideoRecorder
+from torchrl.envs.gym_like import default_info_dict_reader
 
 # 导入自定义环境（确保能识别TwoCarrierEnv）
 from occt_2d2c import TwoCarrierEnv
@@ -60,7 +61,23 @@ def make_env(
         disable_env_checker=True,  # 新增：关闭被动环境检查器，避免观测空间警告
         **gymnasium_kwargs  # 解包传递自定义参数（含vecnorm_frozen）
     )
-    
+
+    # =============== 【核心修复 2/2】 =================
+    # set_info_dict_reader 需要一个函数，而不是列表。
+    # 使用 default_info_dict_reader(["key"]) 来生成这个函数。
+    # 这会告诉 TorchRL："请生成一个函数，这个函数专门去 info 里抓取 'reward_details' 字段"
+    reward_keys = [
+        "reward_r_force", 
+        "reward_r_align", 
+        "reward_r_smooth", 
+        "reward_r_progress", 
+        "reward_val_force"
+    ]
+    base_env.set_info_dict_reader(
+        info_dict_reader=default_info_dict_reader(reward_keys)
+    )
+    # ==================================================
+
     # 第三步：调整TorchRL环境变换逻辑，移除双重归一化，保留必要变换
     env = TransformedEnv(base_env)
     

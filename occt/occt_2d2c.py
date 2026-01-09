@@ -276,33 +276,101 @@ class TwoCarrierEnv(gym.Env):
         return normalized_obs
 
     def _calculate_reward(self):
-        """计算奖励（核心：最小化铰接力+跟随约束）"""
-        # 1. 铰接力惩罚（核心目标）
-        Fh2_x = self.model.Fh_arch[self.model.count, 2]
-        Fh2_y = self.model.Fh_arch[self.model.count, 3]
-        hinge_force_penalty = 1e-10 * (Fh2_x**2 + Fh2_y**2)  # 缩放因子避免数值过大
+        """
+        基于物理反馈的领航跟随奖励函数 (Physics-Feedback Reward)
+        无需参考轨迹，仅依赖动力学状态。
+        """
+        # ================= 1. 从 Model 获取实时物理量 =================
+        # 获取当前仿真步的索引
+        i_sim = self.model.count
         
-        # 2. 跟随误差惩罚（位置+姿态）
-        X1, Y1 = self.model.getXYi(self.model.x, 0)  # 第一辆车位置
-        X2, Y2 = self.model.getXYi(self.model.x, 1)  # 第二辆车位置
-        Psi1 = self.model.x[3]
-        Psi2 = self.model.x[4]
-        pos_error = np.hypot(X2 - X1, Y2 - Y1)
-        psi_error = np.abs(Psi2 - Psi1)
-        tracking_penalty = 1.0 * pos_error + 0.5 * psi_error  # 位置误差权重更高
+        # A. 获取铰接力 (核心指标)
+        # model.py 中 Fh_arch 结构为 [Fh1_x, Fh1_y, Fh2_x, Fh2_y, ...]
+        # 我们控制的是第二辆车(Index=1)，所以取索引 2 和 3
+        Fh2_x = self.model.Fh_arch[i_sim, 2]
+        Fh2_y = self.model.Fh_arch[i_sim, 3]
         
-        # 3. 控制量平滑性惩罚（避免动作突变）
-        if self.model.count > 0:
-            u2_prev = self.model.u_arch[self.model.count - 1, 4:8]  # 上一步第二辆车控制量
-            u2_current = self.model.u_arch[self.model.count, 4:8]
-            control_smooth_penalty = 5 * 1e-7 * np.sum((u2_current - u2_prev)**2)
+        # 计算合力大小 (Newton)
+        F_force_mag = np.hypot(Fh2_x, Fh2_y)
+        
+        # B. 获取姿态与速度
+        x = self.model.x
+        # 索引参考 model.py: 0-2(Cargo), 3(Car1), 4(Car2), 5-9(Velocities)
+        Psi_cargo = x[2]      # 货物航向
+        Psi_rear = x[4]       # 后车(Agent)航向
+        
+        # 获取货物速度 (用于鼓励前进，防止Agent为了受力最小而停车)
+        # x[5]=X_dot_o, x[6]=Y_dot_o
+        V_cargo_mag = np.hypot(x[5], x[6])
+
+        # ================= 2. 读取 Config 参数 =================
+        # 从 yaml 中读取安全阈值，如果未读取到则使用默认值
+        F_safe = self.config.get('force_safe', 2000.0) 
+
+        # ================= 3. 计算分项奖励 =================
+
+        # --- [关键] R_force: 铰接力惩罚 ---
+        # 逻辑：力越小越好。使用非线性惩罚。
+        # 当 F = 0 时，奖励为 0；当 F = F_safe 时，奖励约为 -0.76；当 F >> F_safe，奖励趋向 -1
+        # 这种设计比线性惩罚更好，因为它对小力不敏感（允许轻微调整），但对大力极度敏感
+        r_force = -1.0 * np.tanh(F_force_mag / F_safe)
+
+        # --- [辅助] R_align: 姿态协同惩罚 ---
+        # 逻辑：后车应当尽量与货物保持共线（类似拖车原理），除非在过急弯
+        # 计算后车与货物的相对夹角 [-pi, pi]
+        delta_psi = self._normalize_angle(Psi_rear - Psi_cargo)
+        # 惩罚夹角绝对值。系数设为 0.5，允许一定程度的折叠（过弯需要）
+        r_align = -0.5 * np.abs(delta_psi)
+
+        # --- [辅助] R_smooth: 动作平滑 ---
+        # 防止转向机高频抖动
+        if i_sim > 0:
+            # u_arch 结构: [delta_f1, delta_r1, T_f1, T_r1, delta_f2, delta_r2, T_f2, T_r2]
+            # 后车控制量索引为 4:8
+            u_curr = self.model.u_arch[i_sim, 4:8]
+            u_prev = self.model.u_arch[i_sim - 1, 4:8]
+            
+            # 对转向角变化更为敏感 (索引0和1)
+            steer_diff = np.sum(np.abs(u_curr[:2] - u_prev[:2]))
+            # 对推力变化降低敏感度 (索引2和3)，因为推力数值大(0-1000)需要归一化
+            thrust_diff = np.sum(np.abs(u_curr[2:] - u_prev[2:])) / 1000.0
+            
+            r_smooth = -0.1 * (steer_diff + 0.5 * thrust_diff)
         else:
-            control_smooth_penalty = 0
+            r_smooth = 0.0
+
+        # --- [激励] R_progress: 前进激励 ---
+        # 逻辑：只有在结构安全（受力小）的情况下，才奖励速度。
+        # 如果受力已经很大了，Agent应该优先减速或调整方向，而不是盲目冲。
+        if F_force_mag < F_safe:
+            # 奖励与速度成正比，系数 0.1
+            r_progress = 0.1 * V_cargo_mag
+        else:
+            # 受力过大，取消速度奖励，强制Agent关注受力
+            r_progress = 0.0
+
+        # ================= 4. 总奖励合成 =================
+        # 权重分配：结构安全第一 (2.0)，姿态第二 (1.0)，平滑第三
+        total_reward = (2.0 * r_force) + \
+                       (1.0 * r_align) + \
+                       (1.0 * r_smooth) + \
+                       r_progress
         
-        self.hinge_force_penalty = hinge_force_penalty
-        self.control_smooth_penalty = control_smooth_penalty   
-        # 总奖励 = 负惩罚（最小化目标）
-        return - (0.5 * hinge_force_penalty + 0 * tracking_penalty + 0.5 * control_smooth_penalty)
+        # 存入 info 用于 step 函数返回调试
+        self.reward_info = {
+            "r_force": r_force * 2.0,
+            "r_align": r_align,
+            "r_smooth": r_smooth,
+            "r_progress": r_progress,
+            "val_force": F_force_mag,  # 记录实际受力值 N
+            "val_delta_psi": delta_psi # 记录实际夹角 rad
+        }
+
+        return total_reward
+
+    def _normalize_angle(self, angle):
+        """将角度标准化到 [-pi, pi]"""
+        return (angle + np.pi) % (2 * np.pi) - np.pi
     
     def _get_noisy_u1(self):
         """
@@ -364,6 +432,12 @@ class TwoCarrierEnv(gym.Env):
         X1, Y1 = self.model.getXYi(self.model.x, 0)  # 第一辆车位置
         X2, Y2 = self.model.getXYi(self.model.x, 1)  
         info = {
+            "reward_r_force": np.array(self.reward_info.get("r_force", 0.0), dtype=np.float32),
+            "reward_r_align": np.array(self.reward_info.get("r_align", 0.0), dtype=np.float32),
+            "reward_r_smooth": np.array(self.reward_info.get("r_smooth", 0.0), dtype=np.float32),
+            "reward_r_progress": np.array(self.reward_info.get("r_progress", 0.0), dtype=np.float32),
+            "reward_val_force": np.array(self.reward_info.get("val_force", 0.0), dtype=np.float32),
+            "reward_val_delta_psi": np.array(self.reward_info.get("val_delta_psi", 0.0), dtype=np.float32),
             'Fh2': (self.model.Fh_arch[self.model.count, 2], 
                     self.model.Fh_arch[self.model.count, 3]),
             'pos_error': np.hypot(

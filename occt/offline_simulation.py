@@ -222,14 +222,14 @@ def run_offline_simulation(actor, cfg, vecnorm_state, args):
                 # print(f" Step{ep_length :4d} | Action (normalized): {action_tensor.squeeze(0).cpu().numpy().round(3)}")
                 # 移除batch维度 + 转换为numpy数组（环境接受numpy）
                 action_np = action_tensor.squeeze(0).cpu().numpy()
-                action_np[0] = np.clip(
-                    action_np[0], 
-                    -0.2, 0.2  # 限制u2动作范围
-                )
-                action_np[1] = np.clip(
-                    action_np[1], 
-                    -0.2, 0.2  # 限制u2动作范围
-                )
+                # action_np[0] = np.clip(
+                #     action_np[0], 
+                #     -0.2, 0.2  # 限制u2动作范围
+                # )
+                # action_np[1] = np.clip(
+                #     action_np[1], 
+                #     -0.2, 0.2  # 限制u2动作范围
+                # )
                 # action_np = np.array([-1, -1, 1, 0])
                 # print(f" Predicted action (normalized): {action_np.round(3)}")
                 # c. 环境step（标准Gym接口，环境自动反归一化动作）
@@ -317,8 +317,6 @@ def run_offline_simulation(actor, cfg, vecnorm_state, args):
 def main():
     args = parse_args()
     
-    CKPT_PATH="E:\rl\occt\outputs\2026-01-06\19-06-31\checkpoints_occt\checkpoint_1024000_frames.pt"
-    DEVICE="cpu"
     # 加载Checkpoint
     actor, cfg, vecnorm_state = load_checkpoint(args.ckpt_path, args.device)
     

@@ -342,6 +342,39 @@ def main(cfg: DictConfig):
                 }
             )
 
+        # PPO_occt_check.py 的 main 函数循环中
+
+        # ================= 修改点5：提取并统计 Reward 分项 =================
+        try:
+            # 定义我们要记录的 key (与环境和 utils 中一致)
+            reward_keys = [
+                "reward_r_force", 
+                "reward_r_align", 
+                "reward_r_smooth", 
+                "reward_r_progress", 
+                "reward_val_force"
+            ]
+            
+            # TorchRL 通常会将 info 中的 scalar 数据提升到 "next" 的一级 key
+            # 或者在 ("next", "info", key)
+            
+            # 优先检查 data["next"] 下是否有这些 key
+            next_td = data["next"]
+            
+            for key in reward_keys:
+                # 检查 key 是否存在于 TensorDict
+                if key in next_td.keys():
+                    val_mean = next_td[key].float().mean().item()
+                    metrics_to_log[f"reward_parts/{key}"] = val_mean
+                # 备选：有时候会在 info 嵌套下
+                elif ("info", key) in next_td.keys(include_nested=True):
+                    val_mean = next_td["info", key].float().mean().item()
+                    metrics_to_log[f"reward_parts/{key}"] = val_mean
+
+        except Exception as e:
+            if i == 0: print(f"⚠️ 提取 Reward Details 失败: {e}")
+        # ===================================================================
+
         with timeit("training"):
             for j in range(cfg_loss_ppo_epochs):
 
