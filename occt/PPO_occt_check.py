@@ -352,7 +352,8 @@ def main(cfg: DictConfig):
                 "reward_r_align", 
                 "reward_r_smooth", 
                 "reward_r_progress", 
-                "reward_val_force"
+                "reward_val_force",
+                "reward_val_delta_psi"
             ]
             
             # TorchRL 通常会将 info 中的 scalar 数据提升到 "next" 的一级 key

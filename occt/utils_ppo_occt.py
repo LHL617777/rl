@@ -71,7 +71,8 @@ def make_env(
         "reward_r_align", 
         "reward_r_smooth", 
         "reward_r_progress", 
-        "reward_val_force"
+        "reward_val_force",
+        "reward_val_delta_psi"
     ]
     base_env.set_info_dict_reader(
         info_dict_reader=default_info_dict_reader(reward_keys)

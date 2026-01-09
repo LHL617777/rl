@@ -473,6 +473,42 @@ class TwoCarrierEnv(gym.Env):
         if hasattr(self, '_prev_u1_noisy'):
             del self._prev_u1_noisy  # 重置第一辆车扰动历史
         
+        # # warm up
+        # # 强制运行 5 步“空操作”，让 VecNorm 统计量适应初始状态
+        # # 这期间动作设为 0，不记录轨迹（或者记录也行，看你想不想看预热过程）
+        # warmup_steps = 5
+        # zero_action = np.zeros(4) # 假设4维动作
+        
+        # # 临时解冻 VecNorm 以便更新统计量
+        # was_frozen = self.vecnorm_frozen
+        # self.vecnorm_frozen = False
+        # for _ in range(warmup_steps):
+        #     # 这里的 step 仅仅为了更新 model 内部状态和 VecNorm 统计量
+        #     # 也就是所谓的 "Burn-in" 过程
+        #     # 注意：这里我们不需要 u1 的扰动，只为了让观测数据流转起来
+        #     u_zero = np.concatenate([self.u1_random, zero_action]) # 假设u1也保持静止
+        #     self.model.step(u_zero)
+            
+        #     # 获取观测会触发 _update_vecnorm_stats
+        #     _ = self._get_observation()
+
+        # # 恢复 VecNorm 冻结状态
+        # self.vecnorm_frozen = was_frozen
+
+        # # 重置 Model 的计数器和轨迹（相当于预热完把时间拨回0）
+        # # 但保留了 VecNorm 里已经更新好的 Mean/Var！
+        # self.model.count = 0
+        # self.model.x = np.array([
+        #     self.config['X_o_0'], self.config['Y_o_0'], self.config['Psi_o_0'],
+        #     self.config['Psi_1_0'], self.config['Psi_2_0'],
+        #     0, 0, 0, 0, 0 # 速度归零
+        # ], dtype=np.float64)
+        # # 清空预热期间的轨迹记录
+        # self.model.x_arch[0, :] = self.model.x
+        # self.model.u_arch.fill(0) # 动作归零
+        # self.model.Fh_arch.fill(0)
+        # # ==============================================
+
         # 2. 处理options，提取clear_frames（优先从options获取，适配auto_reset=True）
         options = options or {}
         # 优先级：options中的clear_frames > 显式传入的clear_frames > 默认False
@@ -495,6 +531,7 @@ class TwoCarrierEnv(gym.Env):
             self._reset_visualization() 
         self.is_sim_finished = False
         observation = self._get_observation()  # 直接获取归一化后的观测
+        self._record_trajectories()
         return observation, {}
 
     # ===================================== 新增：VecNorm 模式切换方法 =====================================

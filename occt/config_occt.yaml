@@ -5,7 +5,7 @@ env:
 # collector
 collector:
   frames_per_batch: 2048
-  total_frames: 1024_000
+  total_frames: 2048000
   num_workers: 4
 
 # logger
