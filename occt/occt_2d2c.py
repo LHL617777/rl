@@ -335,7 +335,7 @@ class TwoCarrierEnv(gym.Env):
             # 对推力变化降低敏感度 (索引2和3)，因为推力数值大(0-1000)需要归一化
             thrust_diff = np.sum(np.abs(u_curr[2:] - u_prev[2:])) / 1000.0
             
-            r_smooth = -0.1 * (steer_diff + 0.5 * thrust_diff)
+            r_smooth = -0.1 * (5.0 * steer_diff + 0.5 * thrust_diff)
         else:
             r_smooth = 0.0
 
