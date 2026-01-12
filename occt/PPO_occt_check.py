@@ -351,7 +351,8 @@ def main(cfg: DictConfig):
                 "reward_r_force", 
                 "reward_r_align", 
                 "reward_r_smooth", 
-                "reward_r_progress", 
+                "reward_r_progress",
+                "reward_r_stability",
                 "reward_val_force",
                 "reward_val_delta_psi"
             ]

@@ -320,7 +320,7 @@ class TwoCarrierEnv(gym.Env):
         # 计算后车与货物的相对夹角 [-pi, pi]
         delta_psi = self._normalize_angle(Psi_rear - Psi_cargo)
         # 惩罚夹角绝对值。系数设为 0.5，允许一定程度的折叠（过弯需要）
-        r_align = -0.5 * np.abs(delta_psi)
+        r_align = -2.0 * np.square(delta_psi)
 
         # --- [辅助] R_smooth: 动作平滑 ---
         # 防止转向机高频抖动
@@ -348,13 +348,20 @@ class TwoCarrierEnv(gym.Env):
         else:
             # 受力过大，取消速度奖励，强制Agent关注受力
             r_progress = 0.0
+        
+        # 获取后车角速度 (对应状态向量 x[9]: Psi_dot_2)
+        Psi_dot_rear = self.model.x[9]
+
+        # 设计惩罚项：对角速度的平方进行惩罚，鼓励稳定行驶
+        r_stability = -5.0 * np.square(Psi_dot_rear)
 
         # ================= 4. 总奖励合成 =================
         # 权重分配：结构安全第一 (2.0)，姿态第二 (1.0)，平滑第三
         total_reward = (2.0 * r_force) + \
                        (1.0 * r_align) + \
                        (1.0 * r_smooth) + \
-                       r_progress
+                       r_progress + \
+                       r_stability
         
         # 存入 info 用于 step 函数返回调试
         self.reward_info = {
@@ -362,6 +369,7 @@ class TwoCarrierEnv(gym.Env):
             "r_align": r_align,
             "r_smooth": r_smooth,
             "r_progress": r_progress,
+            "r_stability": r_stability,
             "val_force": F_force_mag,  # 记录实际受力值 N
             "val_delta_psi": delta_psi # 记录实际夹角 rad
         }
@@ -436,6 +444,7 @@ class TwoCarrierEnv(gym.Env):
             "reward_r_align": np.array(self.reward_info.get("r_align", 0.0), dtype=np.float32),
             "reward_r_smooth": np.array(self.reward_info.get("r_smooth", 0.0), dtype=np.float32),
             "reward_r_progress": np.array(self.reward_info.get("r_progress", 0.0), dtype=np.float32),
+            "reward_r_stability": np.array(self.reward_info.get("r_stability", 0.0), dtype=np.float32),
             "reward_val_force": np.array(self.reward_info.get("val_force", 0.0), dtype=np.float32),
             "reward_val_delta_psi": np.array(self.reward_info.get("val_delta_psi", 0.0), dtype=np.float32),
             'Fh2': (self.model.Fh_arch[self.model.count, 2], 

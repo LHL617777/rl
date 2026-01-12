@@ -43,7 +43,7 @@ integrator: "RK4" # 'RK4', 'EE'
 
 # 铰接力相关配置（满足RL代码安全惩罚）
 
-force_safe: 2000.0 # 铰接力安全阈值（可调整）
+force_safe: 1000.0 # 铰接力安全阈值（可调整）
 size: 0.2
 width_Fh: 0.1
 c_hinge: "#0077BB"
