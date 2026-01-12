@@ -264,9 +264,9 @@ def main(cfg: DictConfig):
         torch.save(ckpt_dict, save_path)
         print(f"\n✅ Checkpoint saved to: {save_path}")
         # 打印VecNorm统计量，监控训练收敛情况
-        if raw_train_env is not None:
-            print(f"✅ 附带VecNorm均值前12维：{vecnorm_mean[:12].round(6)}")
-            print(f"✅ 附带VecNorm方差前12维：{vecnorm_var[:12].round(6)}")
+        # if raw_train_env is not None:
+        #     print(f"✅ 附带VecNorm均值前12维：{vecnorm_mean[:12].round(6)}")
+        #     print(f"✅ 附带VecNorm方差前12维：{vecnorm_var[:12].round(6)}")
 
     # ===================== 新增：Checkpoint加载函数（可选，用于后续继续训练/评测） =====================
     def load_checkpoint(ckpt_path, target_env=None):
@@ -293,7 +293,7 @@ def main(cfg: DictConfig):
                     raw_env.vecnorm_mean = np.asarray(ckpt_dict["vecnorm_mean"], dtype=np.float64)
                     raw_env.vecnorm_var = np.asarray(ckpt_dict["vecnorm_var"], dtype=np.float64)
                     raw_env.vecnorm_frozen = ckpt_dict["vecnorm_frozen"]
-                    print(f"✅ 已从Checkpoint恢复VecNorm统计量，冻结状态：{raw_env.vecnorm_frozen}")
+                    # print(f"✅ 已从Checkpoint恢复VecNorm统计量，冻结状态：{raw_env.vecnorm_frozen}")
             except Exception as e:
                 print(f"⚠️ 恢复VecNorm统计量失败：{e}")
         
@@ -440,7 +440,7 @@ def main(cfg: DictConfig):
                     if raw_train_env is not None:
                         train_vecnorm_mean = raw_train_env.vecnorm_mean.copy()
                         train_vecnorm_var = raw_train_env.vecnorm_var.copy()
-                        print(f"✅ 提取到训练环境最新VecNorm：均值前5维 {train_vecnorm_mean[:5].round(6)}，方差前5维 {train_vecnorm_var[:5].round(6)}")
+                        # print(f"✅ 提取到训练环境最新VecNorm：均值前5维 {train_vecnorm_mean[:5].round(6)}，方差前5维 {train_vecnorm_var[:5].round(6)}")
                 except Exception as e:
                     print(f"⚠️ 提取训练环境VecNorm失败，将使用默认值：{e}")
 
@@ -456,7 +456,7 @@ def main(cfg: DictConfig):
                         raw_test_env.vecnorm_var = train_vecnorm_var
                         # 强制确认冻结，避免意外更新
                         raw_test_env.vecnorm_frozen = True
-                        print(f"✅ 已将训练环境VecNorm同步到test_env，且保持冻结状态")
+                        # print(f"✅ 已将训练环境VecNorm同步到test_env，且保持冻结状态")
                 except Exception as e:
                     print(f"⚠️ 同步VecNorm到test_env失败：{e}")
                 
