@@ -1001,7 +1001,7 @@ class TwoCarrierEnv(gym.Env):
 gym.register(
     id="TwoCarrierEnv-v0",
     entry_point="occt_2d2c:TwoCarrierEnv",
-    max_episode_steps=1000,
+    max_episode_steps=1024,
     kwargs={}  # 预留参数
 )
 
