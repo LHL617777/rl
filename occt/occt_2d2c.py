@@ -356,19 +356,19 @@ class TwoCarrierEnv(gym.Env):
         r_stability = -5.0 * np.square(Psi_dot_rear)
 
         # ================= 4. 总奖励合成 =================
-        # 权重分配：结构安全第一 (2.0)，姿态第二 (1.0)，平滑第三
-        total_reward = (2.0 * r_force) + \
-                       (1.0 * r_align) + \
-                       (1.0 * r_smooth) + \
-                       r_progress + \
+        # 权重分配：结构安全第一 (1.0)，姿态第二 (1.0)，平滑第三
+        total_reward = (1.0 * r_force) + \
+                       (2.0 * r_align) + \
+                       (2.0 * r_smooth) + \
+                       (2.0 * r_progress) + \
                        r_stability
         
         # 存入 info 用于 step 函数返回调试
         self.reward_info = {
-            "r_force": r_force * 2.0,
-            "r_align": r_align,
-            "r_smooth": r_smooth,
-            "r_progress": r_progress,
+            "r_force": r_force * 1.0,
+            "r_align": r_align * 2.0,
+            "r_smooth": r_smooth * 2.0,
+            "r_progress": r_progress * 2.0,
             "r_stability": r_stability,
             "val_force": F_force_mag,  # 记录实际受力值 N
             "val_delta_psi": delta_psi # 记录实际夹角 rad
