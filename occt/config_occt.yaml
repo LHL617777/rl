@@ -1,6 +1,7 @@
 # task and env
 env:
   env_name: TwoCarrierEnv-v1
+  num_envs: 8
 
 # collector
 collector:
