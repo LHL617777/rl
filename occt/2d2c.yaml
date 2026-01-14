@@ -37,7 +37,7 @@ Psi_dot_1_0: 0
 Psi_dot_2_0: 0
 
 # 保留平级的T、dt、integrator（满足Model2D2C初始化）
-T: 10.0
+T: 10.24
 dt: 0.01
 integrator: "RK4" # 'RK4', 'EE'
 

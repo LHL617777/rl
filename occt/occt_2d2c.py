@@ -29,6 +29,25 @@ class TwoCarrierEnv(gym.Env):
         # 加载2d2c.yaml配置文件（优先使用传入路径，否则加载同一目录下的2d2c.yaml）
         self.config_name = '2d2c'
         self.config = self._load_config(config_path)
+
+        # ================== [新增] 初始速度热启动 ==================
+        # 设定一个初始速度大小，例如 0.5 m/s
+        self.rng = np.random.default_rng()  # 随机数生成器（保证可复现性）
+        v_init = self.rng.uniform(0.2, 1.0) 
+        
+        # 获取当前的初始朝向 (在域随机化之后获取)
+        psi_init = self.config['Psi_o_0'] 
+        
+        # 分解速度到 X 和 Y 轴
+        # 假设初始时刻是直线行驶，所有部件速度一致
+        vx_init = v_init * np.cos(psi_init)
+        vy_init = v_init * np.sin(psi_init)
+        
+        # 将速度写入 Config (用于 Model 初始化)
+        self.config['X_dot_o_0'] = vx_init
+        self.config['Y_dot_o_0'] = vy_init
+        self.config['Psi_dot_o_0'] = 0.0 # 初始角速度为0
+        # ========================================================
         
         # 初始化动力学模型（使用加载的config）
         self.model = Model2D2C(self.config)
@@ -86,7 +105,6 @@ class TwoCarrierEnv(gym.Env):
         
         # 第一辆车随机控制量
         self.u1_random = np.array([0, 0, 1e3, 1e3])  # 示例：随机控制量
-        self.rng = np.random.default_rng()  # 随机数生成器（保证可复现性）
         # 1. 前轮转角：轮级大偏移 + 步级小扰动（核心：提升轮间差异）
         self.steer_episode_base_std = np.pi/15  # 轮级基础偏移标准差
         self.steer_step_dynamic_std = 0.008     # 步级动态小扰动标准差
@@ -441,6 +459,27 @@ class TwoCarrierEnv(gym.Env):
             "hinge_force_penalty": self.hinge_force_penalty,
             "control_smooth_penalty": self.control_smooth_penalty
         }
+        # ==================== [核心修改] 添加物理熔断机制 ====================
+        # 1. 获取当前物理指标
+        Fh2_x = self.model.Fh_arch[self.model.count, 2]
+        Fh2_y = self.model.Fh_arch[self.model.count, 3]
+        current_force = np.hypot(Fh2_x, Fh2_y)
+        
+        # 2. 定义阈值 (根据你的 yaml 配置，safe 是 2000，这里给个宽容度，比如 3倍或5倍)
+        # 如果力超过 10,000N，说明已经没救了
+        FORCE_TERMINATE_THRESHOLD = 10000.0 
+        
+        # 3. 判断是否提前结束
+        terminated = self.model.is_finish # 原有的时间结束条件
+        
+        if current_force > FORCE_TERMINATE_THRESHOLD:
+            terminated = True
+            # 给予额外的“死亡惩罚”，让模型刻骨铭心
+            reward -= 200.0 
+            # 在 info 里记录一下是因为受力过大挂掉的
+            info['termination_reason'] = 'force_limit'
+        else:
+            info['termination_reason'] = 'time_limit'
 
         return observation, reward, terminated, truncated, info
 
