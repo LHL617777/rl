@@ -22,7 +22,8 @@ class TwoCarrierEnv(gym.Env):
     """两辆车运载超大件系统的自定义强化学习环境"""
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 5}
 
-    def __init__(self, render_mode=None, config_path=None, enable_visualization=False, vecnorm_frozen: bool = False):
+    def __init__(self, render_mode=None, config_path=None, enable_visualization=False, 
+                 vecnorm_frozen: bool = False, vecnorm_mean=None, vecnorm_var=None):
         super().__init__()
         
         # 加载2d2c.yaml配置文件（优先使用传入路径，否则加载同一目录下的2d2c.yaml）
@@ -124,10 +125,29 @@ class TwoCarrierEnv(gym.Env):
         self.vecnorm_frozen = vecnorm_frozen  # 是否冻结统计量
         self.vecnorm_min_var = 1e-4   # 最小方差约束，避免初期方差过小导致归一化值爆炸
         # 滑动统计量（初始化为None，首次观测时根据观测形状自动初始化）
-        self.vecnorm_mean = np.zeros(12, dtype=np.float64)  # 初始均值为0
-        self.vecnorm_var = np.ones(12, dtype=np.float64) * self.vecnorm_min_var  # 初始方差为最小方差
         self.vecnorm_count = 0        # 统计更新次数（用于初始阶段的无偏估计）
         # ==================================================================================================================
+        # 如果用户传入了固定的 mean 和 var，则直接加载并强制冻结
+        if vecnorm_mean is not None and vecnorm_var is not None:
+            self.vecnorm_mean = np.array(vecnorm_mean, dtype=np.float64)
+            self.vecnorm_var = np.array(vecnorm_var, dtype=np.float64)
+            
+            # 完整性检查：确保维度匹配 (这里假设是12维)
+            assert self.vecnorm_mean.shape == (12,), f"Expected mean shape (12,), got {self.vecnorm_mean.shape}"
+            assert self.vecnorm_var.shape == (12,), f"Expected var shape (12,), got {self.vecnorm_var.shape}"
+            
+            # 强制执行最小方差限制，防止传入的方差中有0
+            self.vecnorm_var = np.maximum(self.vecnorm_var, self.vecnorm_min_var)
+            
+            # 既然是传入固定值，通常意味着用于测试/部署，因此强制冻结
+            self.vecnorm_frozen = True
+            print(f"【TwoCarrierEnv】已加载固定归一化统计量，VecNorm 状态已冻结。")
+        else:
+            # 否则使用原本的在线统计逻辑
+            self.vecnorm_frozen = vecnorm_frozen
+            self.vecnorm_mean = np.zeros(12, dtype=np.float64) 
+            self.vecnorm_var = np.ones(12, dtype=np.float64) * self.vecnorm_min_var
+        
         self.hinge_force_penalty = 0.0
         self.control_smooth_penalty = 0.0
 

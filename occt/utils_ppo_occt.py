@@ -33,7 +33,9 @@ def make_env(
     from_pixels: bool = False,
     render_mode=None,  # 自定义参数：渲染模式
     enable_visualization: bool = False,  # 自定义参数：可视化开关
-    vecnorm_frozen: bool = False  # 新增：VecNorm冻结标记，训练=False（默认），评测=True
+    vecnorm_frozen: bool = False,  # 新增：VecNorm冻结标记，训练=False（默认），评测=True
+    vecnorm_mean=None,
+    vecnorm_var=None
 ):
     """
     创建环境（传env_name字符串，直接透传自定义参数，解决未知关键字参数错误）
@@ -47,7 +49,9 @@ def make_env(
             "render_mode": render_mode,
             "enable_visualization": enable_visualization,
             # 新增：将VecNorm冻结标记传递给TwoCarrierEnv
-            "vecnorm_frozen": vecnorm_frozen
+            "vecnorm_frozen": vecnorm_frozen,
+            "vecnorm_mean": vecnorm_mean,
+            "vecnorm_var": vecnorm_var
         }
     
     # 第二步：传env_name字符串，直接透传自定义参数给GymEnv

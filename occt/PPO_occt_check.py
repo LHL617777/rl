@@ -74,11 +74,15 @@ def main(cfg: DictConfig):
     actor, critic = make_ppo_models(cfg.env.env_name, device=device)
 
     # Create collector：修改点1 - 封装训练环境，设置vecnorm_frozen=False（不冻结，自动更新统计量）
+    FIXED_MEAN = [0.04698944559461115, -0.39031140444423185, 0.015882202690160913, 0.06630748242527837, -0.05590331404741926, 1.0080574331656453, 0.05336110670656431, 0.0007577968968116929, 0.0010977663278677458, 0.004915869265949438, 768.5920560274656, 794.4100731688111]
+    FIXED_VAR = [9.376645073674055, 1.8753896851724339, 0.009692945325007632, 0.057115060197828284, 0.12090091528081397, 1.324580559740771, 0.40762205078210034, 0.007117080517338356, 0.014747211857313763, 0.013774537514511475, 27697182.688101362, 36831279.00182003]
     collector = Collector(
         create_env_fn=lambda: make_env(  # 用lambda封装，传递VecNorm状态参数
             cfg.env.env_name,
             device,
-            vecnorm_frozen=False  # 训练环境：不冻结VecNorm，统计量随训练更新
+            vecnorm_frozen=False,  # 训练环境：不冻结VecNorm，统计量随训练更新
+            vecnorm_mean=FIXED_MEAN,
+            vecnorm_var=FIXED_VAR
         ),
         policy=actor,
         frames_per_batch=cfg.collector.frames_per_batch,
@@ -158,7 +162,9 @@ def main(cfg: DictConfig):
         from_pixels=logger_video,
         render_mode=None,  # 自定义rgb_array渲染模式
         enable_visualization=False,  # 自定义可视化功能
-        vecnorm_frozen=True  # 评测环境：冻结VecNorm，不更新统计量，保证评测结果稳定
+        vecnorm_frozen=True,  # 评测环境：冻结VecNorm，不更新统计量，保证评测结果稳定
+        vecnorm_mean=FIXED_MEAN,
+        vecnorm_var=FIXED_VAR
     )
     test_env.eval()
 
