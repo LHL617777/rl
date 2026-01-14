@@ -358,7 +358,7 @@ class TwoCarrierEnv(gym.Env):
 
         # R_align: 姿态协同惩罚 (后车与货物夹角)
         delta_psi = self._normalize_angle(Psi_rear - Psi_cargo)
-        r_align = -2.0 * np.square(delta_psi)
+        r_align = -1.0 * np.square(delta_psi)
 
         # R_smooth: 动作平滑
         if i_sim > 0:
@@ -382,17 +382,17 @@ class TwoCarrierEnv(gym.Env):
 
         # ================= 4. 总奖励合成 =================
         total_reward = (1.0 * r_force) + \
-                       (2.0 * r_align) + \
+                       (1.0 * r_align) + \
                        (2.0 * r_smooth) + \
                        (2.0 * r_progress) + \
-                       r_stability
+                       (2.0 * r_stability)
         
         self.reward_info = {
             "r_force": r_force * 1.0,
-            "r_align": r_align * 2.0,
+            "r_align": r_align * 1.0,
             "r_smooth": r_smooth * 2.0,
             "r_progress": r_progress * 2.0,
-            "r_stability": r_stability,
+            "r_stability": r_stability * 2.0,
             "val_force": F_force_mag,
             "val_delta_psi": delta_psi
         }
