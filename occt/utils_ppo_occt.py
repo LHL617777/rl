@@ -28,7 +28,7 @@ from occt_2d2c import TwoCarrierEnv
 
 
 def make_env(
-    env_name="TwoCarrierEnv-v0",
+    env_name="TwoCarrierEnv-v1",
     device="cpu",
     from_pixels: bool = False,
     render_mode=None,  # 自定义参数：渲染模式
@@ -41,7 +41,7 @@ def make_env(
     """
     # 第一步：针对自定义环境，构造需要透传的参数（直接作为GymEnv的关键字参数）
     gymnasium_kwargs = {}
-    if env_name == "TwoCarrierEnv-v0":
+    if env_name == "TwoCarrierEnv-v1":
         # 直接构造自定义环境的__init__参数，新增vecnorm_frozen透传
         gymnasium_kwargs = {
             "render_mode": render_mode,

@@ -32,31 +32,45 @@ class TwoCarrierEnv(gym.Env):
         # 初始化动力学模型（使用加载的config）
         self.model = Model2D2C(self.config)
         
-        # 状态空间定义（观测：两车状态+铰接力）
-        # 状态向量包含：超大件位置/姿态、两车姿态、各部分速度（共10维）+ 铰接力（2维）
+        # =========================================================================================
+        # 修改：状态空间定义（以第二辆车/后车为基准的坐标系）
+        # 维度映射 (12维):
+        # [0]  X_2          : 后车全局X坐标
+        # [1]  Y_2          : 后车全局Y坐标
+        # [2]  Psi_2        : 后车全局航向角
+        # [3]  Psi_o_2      : 超大件相对后车夹角 (Psi_o - Psi_2)
+        # [4]  Psi_1_o      : 前车相对超大件夹角 (Psi_1 - Psi_o)
+        # [5]  X_dot_2      : 后车全局X速度
+        # [6]  Y_dot_2      : 后车全局Y速度
+        # [7]  Psi_dot_2    : 后车角速度
+        # [8]  Psi_dot_o_2  : 超大件相对后车角速度差 (Psi_dot_o - Psi_dot_2)
+        # [9]  Psi_dot_1_o  : 前车相对超大件角速度差 (Psi_dot_1 - Psi_dot_o)
+        # [10] Fh2_x        : 后车铰接力X
+        # [11] Fh2_y        : 后车铰接力Y
+        # =========================================================================================
+        
+        # 定义物理边界（主要用于参考，VecNorm会处理实际数值范围）
         obs_low = np.array([
-            -100, -100, -np.pi,  # 超大件 X, Y, Psi_o
-            -np.pi, -np.pi,      # 两车姿态 Psi_1, Psi_2
-            -10, -10, -5,        # 超大件速度 X_dot, Y_dot, Psi_dot_o
-            -5, -5,              # 两车角速度 Psi_dot_1, Psi_dot_2
-            -1e5, -1e5           # 铰接力 Fh_x, Fh_y（第二辆车）
+            -np.inf, -np.inf, -np.pi,   # X_2, Y_2, Psi_2
+            -np.pi, -np.pi,             # Psi_o_2, Psi_1_o (相对角)
+            -20, -20, -5,               # X_dot_2, Y_dot_2, Psi_dot_2
+            -10, -10,                   # Psi_dot_o_2, Psi_dot_1_o
+            -1e5, -1e5                  # Fh
         ])
         obs_high = np.array([
-            100, 100, np.pi,
+            np.inf, np.inf, np.pi,
             np.pi, np.pi,
-            10, 10, 5,
-            5, 5,
+            20, 20, 5,
+            10, 10,
             1e5, 1e5
         ])
+        
         # 归一化后的观测空间（合理范围，覆盖归一化后的所有可能值）
         obs_norm_low = np.full(12, -1000.0, dtype=np.float64)  # 12维观测，下限-1000
         obs_norm_high = np.full(12, 1000.0, dtype=np.float64)   # 12维观测，上限1000
         self.observation_space = spaces.Box(
             low=obs_norm_low, high=obs_norm_high, dtype=np.float64
         )
-        # self.observation_space = spaces.Box(
-        #     low=obs_low, high=obs_high, dtype=np.float64
-        # )
         
         # 原始动作空间上下限（保存用于归一化/反归一化）
         self.original_action_low = np.array([-np.pi/6, -np.pi/6, 0, 0])  # 原始下限
@@ -73,16 +87,16 @@ class TwoCarrierEnv(gym.Env):
         self.u1_random = np.array([0, 0, 1e3, 1e3])  # 示例：随机控制量
         self.rng = np.random.default_rng()  # 随机数生成器（保证可复现性）
         # 1. 前轮转角：轮级大偏移 + 步级小扰动（核心：提升轮间差异）
-        self.steer_episode_base_std = np.pi/15  # 轮级基础偏移标准差（≈12°，大幅提升轮间差异）
-        self.steer_step_dynamic_std = 0.008     # 步级动态小扰动标准差（≈0.46°，保证轮内平滑）
-        self.steer_max_bound = np.pi/6          # 最大转角约束（±30°，与原始动作空间一致）
+        self.steer_episode_base_std = np.pi/15  # 轮级基础偏移标准差
+        self.steer_step_dynamic_std = 0.008     # 步级动态小扰动标准差
+        self.steer_max_bound = np.pi/6          # 最大转角约束
         self.steer_min_bound = -np.pi/6
         # 新增：存储轮级固定基础偏移（每轮重置时更新）
         self.steer_episode_offset = 0.0
-        # 2. 推力噪声（保留原有真实车辆特性，无修改）
-        self.thrust_noise_rel_std = 0.02  # 相对标准差2%（真实发动机输出波动通常<5%）
-        self.thrust_noise_abs_min = 0  # 推力最低为0（不能为负，无反向驱动力）
-        self.thrust_noise_abs_max = 1e3  # 推力最高不超过原始上限
+        # 2. 推力噪声
+        self.thrust_noise_rel_std = 0.02 
+        self.thrust_noise_abs_min = 0  
+        self.thrust_noise_abs_max = 1e3 
         
         # 可视化开关
         self.enable_visualization = enable_visualization
@@ -162,31 +176,17 @@ class TwoCarrierEnv(gym.Env):
         }
 
     def normalize_action(self, original_action):
-        """
-        将原始动作（原始空间）归一化到[-1, 1]区间
-        :param original_action: 原始动作，shape=(4,)，对应[前轮转向角, 后轮转向角, 前轮推力, 后轮推力]
-        :return: 归一化后的动作，shape=(4,)，范围[-1, 1]
-        """
-        # 线性归一化公式：norm_action = 2 * (orig_action - orig_low) / (orig_high - orig_low) - 1
-        # 避免除零（防止原始上下限相等）
+        """将原始动作（原始空间）归一化到[-1, 1]区间"""
         orig_range = self.original_action_high - self.original_action_low
         orig_range = np.where(orig_range == 0, 1e-8, orig_range)
-        
         norm_action = 2 * (original_action - self.original_action_low) / orig_range - 1
-        # 裁剪到[-1, 1]，防止超出边界
         norm_action = np.clip(norm_action, -1, 1)
         return norm_action.astype(np.float64)
 
     def denormalize_action(self, normalized_action):
-        """
-        将归一化动作（[-1, 1]）反归一化到原始动作空间
-        :param normalized_action: 归一化动作，shape=(4,)，范围[-1, 1]
-        :return: 原始动作，shape=(4,)，对应原始上下限范围
-        """
-        # 反归一化公式：orig_action = orig_low + (norm_action + 1) * (orig_high - orig_low) / 2
+        """将归一化动作（[-1, 1]）反归一化到原始动作空间"""
         orig_range = self.original_action_high - self.original_action_low
         orig_action = self.original_action_low + (normalized_action + 1) * orig_range / 2
-        # 裁剪到原始动作范围，确保物理有效性
         orig_action = np.clip(
             orig_action, 
             self.original_action_low, 
@@ -194,78 +194,96 @@ class TwoCarrierEnv(gym.Env):
         )
         return orig_action.astype(np.float64)
 
-    # ===================================== 新增：VecNorm 辅助方法1 - 更新滑动统计量 =====================================
     def _update_vecnorm_stats(self, obs):
-        """
-        在线更新 VecNorm 滑动统计量（仅训练阶段、未冻结时执行）
-        :param obs: 原始观测（12维numpy数组，单条观测）
-        """
-        # 若已冻结，直接返回（不更新统计量）
+        """在线更新 VecNorm 滑动统计量"""
         if self.vecnorm_frozen:
             return
         
-        # 统一转换为numpy数组（确保格式一致）
         obs_np = np.asarray(obs, dtype=np.float64)
-        
-        # 首次初始化统计量（匹配观测的12维形状）
         if self.vecnorm_mean is None:
             self.vecnorm_mean = np.zeros_like(obs_np, dtype=np.float64)
             self.vecnorm_var = np.ones_like(obs_np, dtype=np.float64)
         
-        # 计算当前观测的均值和方差（单条观测，直接赋值）
         current_mean = obs_np
-        current_var = np.square(obs_np)  # 单条观测的方差为自身平方
+        current_var = np.square(obs_np)
         current_count = 1
 
-        # 更新滑动统计量（采用无偏滑动平均，与原VecNormV2逻辑一致）
         self.vecnorm_count += current_count
         if self.vecnorm_count <= current_count:
-            # 首次更新，直接赋值
             self.vecnorm_mean = current_mean
             self.vecnorm_var = current_var
         else:
-            # 滑动平均更新：new = decay * old + (1 - decay) * current
             decay = self.vecnorm_decay
             self.vecnorm_mean = decay * self.vecnorm_mean + (1 - decay) * current_mean
             self.vecnorm_var = decay * self.vecnorm_var + (1 - decay) * current_var
-        # 新增：方差下限约束，避免方差过小导致归一化值爆炸
         self.vecnorm_var = np.maximum(self.vecnorm_var, self.vecnorm_min_var)
 
-    # ===================================== 新增：VecNorm 辅助方法2 - 执行观测归一化 =====================================
     def _normalize_observation(self, obs):
-        """
-        执行观测归一化（训练/评测阶段均执行，仅评测阶段不更新统计量）
-        :param obs: 原始观测（12维numpy数组）
-        :return: 归一化后的观测（12维numpy数组，保持原数据类型）
-        """
-        # 若统计量未初始化（首次观测），直接返回原始观测
+        """执行观测归一化"""
         if self.vecnorm_mean is None:
             return obs
-        
-        # 统一转换为numpy数组
         obs_np = np.asarray(obs, dtype=np.float64)
-        
-        # 计算标准差（加eps防止除零）
         std_np = np.sqrt(self.vecnorm_var) + self.vecnorm_eps
-        
-        # 执行归一化：(原始观测 - 滑动均值) / 滑动标准差
         normalized_obs_np = (obs_np - self.vecnorm_mean) / std_np
-        
-        # 恢复原数据类型并返回
         return normalized_obs_np.astype(obs.dtype) if hasattr(obs, 'dtype') else normalized_obs_np
 
     def _get_observation(self):
-        """从模型提取观测值（包含归一化处理）"""
-        x = self.model.x  # 当前状态向量
-        # 提取第二辆车的铰接力（Fh_arch存储格式：[Fh1_x, Fh1_y, Fh2_x, Fh2_y]）
-        Fh2_x = self.model.Fh_arch[self.model.count, 2]
-        Fh2_y = self.model.Fh_arch[self.model.count, 3]
-        # 原始观测（12维）
-        raw_obs = np.concatenate([
-            x[:5],   # 位置与姿态：[Xo, Yo, Psio, Psi1, Psi2]
-            x[5:10], # 速度：[Xo_dot, Yo_dot, Psio_dot, Psi1_dot, Psi2_dot]
-            [Fh2_x, Fh2_y]  # 第二辆车铰接力
-        ])
+        """
+        从模型提取观测值（新版：后车坐标系/相对状态）
+        不修改 model.py，利用其提供的 getXYi, getXYdoti 等方法计算
+        """
+        x = self.model.x  # 当前全局状态向量 (10维)
+        i_sim = self.model.count
+        
+        # --- 1. 获取基础物理量 ---
+        # 索引定义 (基于 model.py):
+        # x[0:2] Cargo Pos, x[2] Cargo Psi
+        # x[3] Front Psi, x[4] Rear Psi
+        # x[5:7] Cargo Vel, x[7] Cargo Omega
+        # x[8] Front Omega, x[9] Rear Omega
+        
+        idx_rear = 1  # 后车索引
+        idx_front = 0 # 前车索引
+        
+        # --- 2. 计算后车 (Agent) 的全局状态 ---
+        # 调用 model 方法计算后车质心全局坐标 (X_2, Y_2)
+        X_2, Y_2 = self.model.getXYi(x, idx_rear)
+        Psi_2 = x[4]
+        
+        # 调用 model 方法计算后车全局速度 (X_dot_2, Y_dot_2)
+        X_dot_2, Y_dot_2 = self.model.getXYdoti(x, idx_rear)
+        Psi_dot_2 = x[9]
+        
+        # --- 3. 计算相对状态 ---
+        Psi_o = x[2]      # 超大件航向
+        Psi_dot_o = x[7]
+        
+        Psi_1 = x[3]      # 前车航向
+        Psi_dot_1 = x[8]
+
+        # 计算相对角度并归一化到 [-pi, pi]
+        # Psi_o_2: 超大件相对后车
+        Psi_o_2 = self._normalize_angle(Psi_o - Psi_2)
+        # Psi_1_o: 前车相对超大件
+        Psi_1_o = self._normalize_angle(Psi_1 - Psi_o)
+        
+        # 计算相对角速度 (无需归一化，直接作差)
+        Psi_dot_o_2 = Psi_dot_o - Psi_dot_2
+        Psi_dot_1_o = Psi_dot_1 - Psi_dot_o
+        
+        # --- 4. 获取铰接力 ---
+        # Fh_arch 存储格式: [Fh1_x, Fh1_y, Fh2_x, Fh2_y]
+        Fh2_x = self.model.Fh_arch[i_sim, 2]
+        Fh2_y = self.model.Fh_arch[i_sim, 3]
+
+        # --- 5. 组装观测向量 (12维) ---
+        raw_obs = np.array([
+            X_2, Y_2, Psi_2,            # [0-2] 后车全局位姿
+            Psi_o_2, Psi_1_o,           # [3-4] 相对角度 (Articulations)
+            X_dot_2, Y_dot_2, Psi_dot_2,# [5-7] 后车全局速度
+            Psi_dot_o_2, Psi_dot_1_o,   # [8-9] 相对角速度
+            Fh2_x, Fh2_y                # [10-11] 铰接力
+        ], dtype=np.float64)
         
         # 步骤1：更新VecNorm统计量（仅训练阶段未冻结时生效）
         self._update_vecnorm_stats(raw_obs)
@@ -281,97 +299,64 @@ class TwoCarrierEnv(gym.Env):
         无需参考轨迹，仅依赖动力学状态。
         """
         # ================= 1. 从 Model 获取实时物理量 =================
-        # 获取当前仿真步的索引
         i_sim = self.model.count
-        
-        # A. 获取铰接力 (核心指标)
-        # model.py 中 Fh_arch 结构为 [Fh1_x, Fh1_y, Fh2_x, Fh2_y, ...]
-        # 我们控制的是第二辆车(Index=1)，所以取索引 2 和 3
         Fh2_x = self.model.Fh_arch[i_sim, 2]
         Fh2_y = self.model.Fh_arch[i_sim, 3]
-        
-        # 计算合力大小 (Newton)
         F_force_mag = np.hypot(Fh2_x, Fh2_y)
         
-        # B. 获取姿态与速度
         x = self.model.x
-        # 索引参考 model.py: 0-2(Cargo), 3(Car1), 4(Car2), 5-9(Velocities)
         Psi_cargo = x[2]      # 货物航向
         Psi_rear = x[4]       # 后车(Agent)航向
         
-        # 获取货物速度 (用于鼓励前进，防止Agent为了受力最小而停车)
-        # x[5]=X_dot_o, x[6]=Y_dot_o
+        # 货物速度
         V_cargo_mag = np.hypot(x[5], x[6])
 
         # ================= 2. 读取 Config 参数 =================
-        # 从 yaml 中读取安全阈值，如果未读取到则使用默认值
         F_safe = self.config.get('force_safe', 2000.0) 
 
         # ================= 3. 计算分项奖励 =================
-
-        # --- [关键] R_force: 铰接力惩罚 ---
-        # 逻辑：力越小越好。使用非线性惩罚。
-        # 当 F = 0 时，奖励为 0；当 F = F_safe 时，奖励约为 -0.76；当 F >> F_safe，奖励趋向 -1
-        # 这种设计比线性惩罚更好，因为它对小力不敏感（允许轻微调整），但对大力极度敏感
+        # R_force: 铰接力惩罚
         r_force = -1.0 * np.tanh(F_force_mag / F_safe)
 
-        # --- [辅助] R_align: 姿态协同惩罚 ---
-        # 逻辑：后车应当尽量与货物保持共线（类似拖车原理），除非在过急弯
-        # 计算后车与货物的相对夹角 [-pi, pi]
+        # R_align: 姿态协同惩罚 (后车与货物夹角)
         delta_psi = self._normalize_angle(Psi_rear - Psi_cargo)
-        # 惩罚夹角绝对值。系数设为 0.5，允许一定程度的折叠（过弯需要）
         r_align = -2.0 * np.square(delta_psi)
 
-        # --- [辅助] R_smooth: 动作平滑 ---
-        # 防止转向机高频抖动
+        # R_smooth: 动作平滑
         if i_sim > 0:
-            # u_arch 结构: [delta_f1, delta_r1, T_f1, T_r1, delta_f2, delta_r2, T_f2, T_r2]
-            # 后车控制量索引为 4:8
             u_curr = self.model.u_arch[i_sim, 4:8]
             u_prev = self.model.u_arch[i_sim - 1, 4:8]
-            
-            # 对转向角变化更为敏感 (索引0和1)
             steer_diff = np.sum(np.abs(u_curr[:2] - u_prev[:2]))
-            # 对推力变化降低敏感度 (索引2和3)，因为推力数值大(0-1000)需要归一化
             thrust_diff = np.sum(np.abs(u_curr[2:] - u_prev[2:])) / 1000.0
-            
             r_smooth = -0.1 * (5.0 * steer_diff + 0.5 * thrust_diff)
         else:
             r_smooth = 0.0
 
-        # --- [激励] R_progress: 前进激励 ---
-        # 逻辑：只有在结构安全（受力小）的情况下，才奖励速度。
-        # 如果受力已经很大了，Agent应该优先减速或调整方向，而不是盲目冲。
+        # R_progress: 前进激励
         if F_force_mag < F_safe:
-            # 奖励与速度成正比，系数 0.1
             r_progress = 0.1 * V_cargo_mag
         else:
-            # 受力过大，取消速度奖励，强制Agent关注受力
             r_progress = 0.0
         
-        # 获取后车角速度 (对应状态向量 x[9]: Psi_dot_2)
+        # R_stability: 稳定性
         Psi_dot_rear = self.model.x[9]
-
-        # 设计惩罚项：对角速度的平方进行惩罚，鼓励稳定行驶
         r_stability = -5.0 * np.square(Psi_dot_rear)
 
         # ================= 4. 总奖励合成 =================
-        # 权重分配：结构安全第一 (1.0)，姿态第二 (1.0)，平滑第三
         total_reward = (1.0 * r_force) + \
                        (2.0 * r_align) + \
                        (2.0 * r_smooth) + \
                        (2.0 * r_progress) + \
                        r_stability
         
-        # 存入 info 用于 step 函数返回调试
         self.reward_info = {
             "r_force": r_force * 1.0,
             "r_align": r_align * 2.0,
             "r_smooth": r_smooth * 2.0,
             "r_progress": r_progress * 2.0,
             "r_stability": r_stability,
-            "val_force": F_force_mag,  # 记录实际受力值 N
-            "val_delta_psi": delta_psi # 记录实际夹角 rad
+            "val_force": F_force_mag,
+            "val_delta_psi": delta_psi
         }
 
         return total_reward
@@ -381,63 +366,42 @@ class TwoCarrierEnv(gym.Env):
         return (angle + np.pi) % (2 * np.pi) - np.pi
     
     def _get_noisy_u1(self):
-        """
-        生成带有真实车辆特性的第一辆车控制量
-        核心原则：合理区间内多样分布、平滑无突变、符合物理约束
-        :return: 带扰动的u1控制量（np.array，与self.u1_fixed同结构）
-        """
-        # 1. 复制原始固定控制量（避免修改原数据）
+        """生成带有真实车辆特性的第一辆车控制量"""
         u1_noisy = np.copy(self.u1_random)
-        
-        # 2. 前轮转角：轮级大偏移 + 步级小扰动 + 平滑 + 约束（核心修改）
-        # 2.1 步级动态小扰动（模拟实时操作误差、路面颠簸，幅度小）
         steer_step_noise = self.rng.normal(loc=0, scale=self.steer_step_dynamic_std)
-        # 2.2 叠加：原始值 + 轮级固定偏移 + 步级小扰动
         steer_candidate = u1_noisy[0] + self.steer_episode_offset + steer_step_noise
-        # 2.3 裁剪约束（不超出车辆最大转向角）
         steer_clipped = np.clip(steer_candidate, self.steer_min_bound, self.steer_max_bound)
         
-        # 2.5 平滑过渡（避免相邻步转角突变，符合驾驶员操控惯性/转向系统阻尼）
         if hasattr(self, '_prev_u1_noisy'):
-            # 平滑权重：当前候选值0.8 + 上一步值0.2
             steer_smoothed = 0.8 * steer_clipped + 0.2 * self._prev_u1_noisy[0]
-            # 平滑后再次裁剪，确保不超出约束
             u1_noisy[0] = np.clip(steer_smoothed, self.steer_min_bound, self.steer_max_bound)
         else:
             u1_noisy[0] = steer_clipped
         
-        # 3. 前后轮推力：固定为原始值
-        
-        # 4. 保存当前扰动值，用于下一步平滑
         self._prev_u1_noisy = np.copy(u1_noisy)
-        
         return u1_noisy.astype(np.float64)
     
     def step(self, action):
-        """环境一步交互（注意：传入的action是归一化后的动作，需先反归一化）"""
-        # 反归一化：将[-1, 1]的动作映射回原始动作空间
+        """环境一步交互"""
         original_action = self.denormalize_action(action)
         
-        # 组合控制量：第一辆车控制量 + 第二辆车原始动作
-        u1 = self._get_noisy_u1()  # 获取带扰动的第一辆车控制量
+        u1 = self._get_noisy_u1()
         u = np.concatenate([u1, original_action])
         
         self.model.step(u)
-        observation = self._get_observation()  # 直接获取归一化后的观测
+        observation = self._get_observation()  # 获取新版观测
         reward = self._calculate_reward()
         self._record_trajectories()
 
-        # 仅在启用可视化时记录轨迹和渲染
         if self.enable_visualization:
             self._record_trajectories()
             self._render_frame()  
             if self.render_mode == "human":
                 plt.pause(0.001)  
         
-        # 判断终止条件（仿真结束）
         terminated = self.model.is_finish
         truncated = False
-        X1, Y1 = self.model.getXYi(self.model.x, 0)  # 第一辆车位置
+        X1, Y1 = self.model.getXYi(self.model.x, 0)
         X2, Y2 = self.model.getXYi(self.model.x, 1)  
         info = {
             "reward_r_force": np.array(self.reward_info.get("r_force", 0.0), dtype=np.float32),
@@ -449,13 +413,10 @@ class TwoCarrierEnv(gym.Env):
             "reward_val_delta_psi": np.array(self.reward_info.get("val_delta_psi", 0.0), dtype=np.float32),
             'Fh2': (self.model.Fh_arch[self.model.count, 2], 
                     self.model.Fh_arch[self.model.count, 3]),
-            'pos_error': np.hypot(
-                self.model.getXYi(self.model.x, 1)[0] - self.model.getXYi(self.model.x, 0)[0],
-                self.model.getXYi(self.model.x, 1)[1] - self.model.getXYi(self.model.x, 0)[1]
-            ),
-            'u1': u1,  # 新增：保存第一辆车控制量，用于可视化车轮摆角
-            'u2_normalized': action,  # 归一化后的动作
-            'u2_original': original_action,  # 原始动作（便于调试）
+            'pos_error': np.hypot(X2 - X1, Y2 - Y1),
+            'u1': u1,
+            'u2_normalized': action,
+            'u2_original': original_action,
             'x': np.array([X1, Y1, X2, Y2]),
             "hinge_force_penalty": self.hinge_force_penalty,
             "control_smooth_penalty": self.control_smooth_penalty
@@ -466,90 +427,70 @@ class TwoCarrierEnv(gym.Env):
     def reset(self, seed=None, options=None, clear_frames=None):
         super().reset(seed=seed)
         if seed is not None:
-            self.rng = np.random.default_rng(seed)  # 重置随机数生成器，保证可复现
+            self.rng = np.random.default_rng(seed)
         self.model = Model2D2C(self.config)
-        # 生成轮级固定基础偏移（正态分布，围绕0，标准差更大）
         self.steer_episode_offset = self.rng.normal(
             loc=0, 
             scale=self.steer_episode_base_std
         )
-        # 轮级偏移先裁剪（确保不超出物理约束）
         self.steer_episode_offset = np.clip(
             self.steer_episode_offset,
             self.steer_min_bound,
             self.steer_max_bound
         )
         if hasattr(self, '_prev_u1_noisy'):
-            del self._prev_u1_noisy  # 重置第一辆车扰动历史
+            del self._prev_u1_noisy
         
+        # Warmup for VecNorm
         if not self.vecnorm_frozen:
             warmup_steps = 5
             zero_action = np.zeros(4) 
-            
             for _ in range(warmup_steps):
-                # 构造静止控制量
                 u_zero = np.concatenate([self.u1_random, zero_action]) 
-                # 执行物理步：让 VecNorm 适应初始观测
                 self.model.step(u_zero)
-                # 获取观测以触发统计量更新 (_update_vecnorm_stats)
                 _ = self._get_observation()
             
-            # Warmup 结束，执行“时间倒流”重置物理状态
             self.model.count = 0
             self.model.x = np.array([
                 self.config['X_o_0'], self.config['Y_o_0'], self.config['Psi_o_0'],
                 self.config['Psi_1_0'], self.config['Psi_2_0'],
                 0, 0, 0, 0, 0 
             ], dtype=np.float64)
-            # 清空 Warmup 产生的脏轨迹数据
             self.model.x_arch[0, :] = self.model.x
             self.model.u_arch.fill(0) 
             self.model.Fh_arch.fill(0)
-            
-            # 如果启用了可视化，Warmup 期间可能会画出几帧，这里重置掉
             if self.enable_visualization:
                 self._reset_visualization()
-        # ==========================================
 
-        # 2. 处理options，提取clear_frames（优先从options获取，适配auto_reset=True）
         options = options or {}
-        # 优先级：options中的clear_frames > 显式传入的clear_frames > 默认False
         final_clear_frames = options.get(
             "clear_frames", 
             clear_frames if clear_frames is not None else False
         )
         
         if self.enable_visualization:
-            # 3. 仅当final_clear_frames=True时，才清空帧列表（修改原有判断条件）
             if final_clear_frames and not self.is_sim_finished:
                 self.render_frames = []
-            self.trajectories = {   # 重置轨迹（保留原有逻辑，不变）
-                'cargo': [],
-                'car1': [],
-                'car2': [],
-                'hinge1': [],
-                'hinge2': []
+            self.trajectories = {
+                'cargo': [], 'car1': [], 'car2': [], 'hinge1': [], 'hinge2': []
             }
             self._reset_visualization() 
         self.is_sim_finished = False
-        observation = self._get_observation()  # 直接获取归一化后的观测
+        observation = self._get_observation()
         self._record_trajectories()
         return observation, {}
 
-    # ===================================== 新增：VecNorm 模式切换方法 =====================================
     def freeze_vecnorm(self):
-        """冻结 VecNorm 统计量（评测模式：停止更新均值/方差，使用训练时累积的统计量）"""
+        """冻结 VecNorm 统计量"""
         self.vecnorm_frozen = True
         print("观测归一化统计量已冻结，进入评测模式")
 
     def unfreeze_vecnorm(self):
-        """解冻 VecNorm 统计量（训练模式：恢复更新均值/方差）"""
+        """解冻 VecNorm 统计量"""
         self.vecnorm_frozen = False
         print("观测归一化统计量已解冻，进入训练模式")
 
-    # ===================================== 新增：VecNorm 状态序列化/反序列化方法 =====================================
     def get_vecnorm_state(self):
-        """导出 VecNorm 状态（用于保存到 checkpoint）"""
         return {
             "vecnorm_mean": self.vecnorm_mean,
             "vecnorm_var": self.vecnorm_var,
@@ -560,7 +501,6 @@ class TwoCarrierEnv(gym.Env):
         }
 
     def set_vecnorm_state(self, vecnorm_state):
-        """从 checkpoint 导入 VecNorm 状态（用于离线评测加载）"""
         self.vecnorm_mean = vecnorm_state["vecnorm_mean"]
         self.vecnorm_var = vecnorm_state["vecnorm_var"]
         self.vecnorm_count = vecnorm_state["vecnorm_count"]
@@ -574,28 +514,20 @@ class TwoCarrierEnv(gym.Env):
         print("仿真已标记为结束，后续reset()不会清空帧列表")
 
     def _record_trajectories(self):
-        """更新轨迹记录，使用参考代码的坐标获取方法，确保数据一致"""
         i_sim = self.model.count
         x = self.model.x_arch[i_sim, :]
-
-        # 超大件质心
         cargo_pos = (x[0], x[1])
         self.trajectories['cargo'].append(cargo_pos)
-
-        # 车辆质心（使用参考代码的getXYi方法）
         car1_pos = self.model.getXYi(x, 0)
         car2_pos = self.model.getXYi(x, 1)
         self.trajectories['car1'].append(car1_pos)
         self.trajectories['car2'].append(car2_pos)
-
-        # 铰接点（使用参考代码的getXYhi方法）
         hinge1_pos = self.model.getXYhi(x, 0)
         hinge2_pos = self.model.getXYhi(x, 1)
         self.trajectories['hinge1'].append(hinge1_pos)
         self.trajectories['hinge2'].append(hinge2_pos)
 
     def _reset_visualization(self):
-        """重构可视化初始化，完全参考参考代码的绘图元素类型"""
         if self.fig is not None:
             plt.close(self.fig)
         self.fig, self.ax = plt.subplots(figsize=(8, 8), dpi=60)
@@ -606,56 +538,33 @@ class TwoCarrierEnv(gym.Env):
         self.ax.set_aspect('equal', adjustable='box')
         self.ax.set_title("两车运载超大件系统仿真可视化", fontsize=16)
 
-        # 初始化绘图句柄（与参考代码一一对应）
         self.plot_handles = {
-            # 1. 车轮：线集合（LineCollection）
             'tire': None,
-            # 2. 铰接力：箭头列表
             'Fh': [],
-            # 3. 铰接点：多边形列表
             'hinge': [],
-            # 4. 货物：多边形
             'cargo': None,
-            # 5. 车辆：多边形列表（两车）
             'car': [],
-            # 6. 轨迹线：保持原有轨迹逻辑
             'cargo_traj': self.ax.plot([], [], 'k--', alpha=0.3, linewidth=1)[0],
             'car1_traj': self.ax.plot([], [], '#3498db', linestyle='--', alpha=0.4, linewidth=1)[0],
             'car2_traj': self.ax.plot([], [], '#e74c3c', linestyle='--', alpha=0.4, linewidth=1)[0],
             'hinge1_traj': self.ax.plot([], [], ':', color='blue', alpha=0.2, linewidth=0.8)[0],
             'hinge2_traj': self.ax.plot([], [], ':', color='orange', alpha=0.2, linewidth=0.8)[0]
         }
-
-        # 标记是否为首次绘制（首次初始化绘图元素，后续仅更新数据）
         self.first_render = True
 
     def _render_frame(self):
-        """重构帧渲染，完全遵循参考代码的坐标变换与可视化逻辑（新增内存优化）"""
-        # 初始化可视化（若未初始化）
         if self.fig is None or self.ax is None:
             self._reset_visualization()
 
-        # 获取当前仿真步数据（与参考代码对齐）
         i_sim = self.model.count
-        x = self.model.x_arch[i_sim, :]
-        u = self.model.u_arch[i_sim, :]
-
-        # 1. 获取所有可视化数据（复用参考代码的核心方法）
-        # 车轮线段数据
         tire_segments = self.model.getTireVis(i_sim)
-        # 铰接力箭头+铰接点标记数据
         fh_arrows, hinge_markers = self.model.getHingeVis(i_sim)
-        # 货物多边形数据
         cargo_polygon = self.model.getOversizedCargoVis(i_sim)
-        # 车辆多边形数据（两车）
         car_polygons = self.model.getCarrierVis(i_sim)
-        # 分解铰接力箭头数据，便于更新
         fh_color = self.model.config.get('c_Fh', 'green')
         fh_width = self.model.config.get('width_Fh', 0.01)
 
-        # 2. 首次绘制：初始化绘图元素（后续仅更新数据，避免重复创建）
         if self.first_render:
-            # 2.1 车轮：LineCollection
             self.plot_handles['tire'] = LineCollection(
                 tire_segments,
                 colors=self.model.config['c_tire'],
@@ -664,93 +573,65 @@ class TwoCarrierEnv(gym.Env):
             )
             self.ax.add_collection(self.plot_handles['tire'])
 
-            # 2.2 铰接力：箭头
             for arrow_data in fh_arrows:
                 h = self.ax.arrow(
                     arrow_data[0], arrow_data[1], arrow_data[2], arrow_data[3],
-                    width=fh_width,  # 固定宽度，后续不再修改
+                    width=fh_width,
                     color=fh_color,
                     zorder=2.4,
                     alpha=0.7
                 )
                 self.plot_handles['Fh'].append(h)
 
-            # 2.3 铰接点：多边形标记
             for marker_poly in hinge_markers:
-                h = Polygon(
-                    marker_poly,
-                    zorder=2.6,
-                    alpha=1.0,
-                    fc='black',
-                    ec='white'
-                )
+                h = Polygon(marker_poly, zorder=2.6, alpha=1.0, fc='black', ec='white')
                 self.ax.add_patch(h)
                 self.plot_handles['hinge'].append(h)
 
-            # 2.4 货物：多边形
             if cargo_polygon:
                 self.plot_handles['cargo'] = Polygon(
-                    cargo_polygon,
-                    zorder=2.5,
-                    alpha=self.model.config['alpha_o'],
-                    fc=self.model.config['fc_o'],
-                    ec='black',
-                    linewidth=1.5
+                    cargo_polygon, zorder=2.5, alpha=self.model.config['alpha_o'],
+                    fc=self.model.config['fc_o'], ec='black', linewidth=1.5
                 )
                 self.ax.add_patch(self.plot_handles['cargo'])
 
-            # 2.5 车辆：多边形（两车分别设置颜色）
             for i, poly in enumerate(car_polygons):
                 h = Polygon(
-                    poly,
-                    zorder=2.5,
-                    alpha=self.model.config['alpha_c'],
-                    fc=self.model.config['fc_c'][i],
-                    ec='black',
-                    linewidth=1
+                    poly, zorder=2.5, alpha=self.model.config['alpha_c'],
+                    fc=self.model.config['fc_c'][i], ec='black', linewidth=1
                 )
                 self.ax.add_patch(h)
                 self.plot_handles['car'].append(h)
 
-            self.first_render = False  # 首次绘制完成，后续仅更新数据
+            self.first_render = False
 
-        # 3. 非首次绘制：更新所有绘图元素数据（核心：仅更新数据，不重新创建）
         else:
-            # 3.1 更新车轮线段
             self.plot_handles['tire'].set_segments(tire_segments)
 
-            # 3.2 更新铰接力箭头
-            # 移除旧箭头
             for h in self.plot_handles['Fh']:
                 h.remove()
             self.plot_handles['Fh'].clear()
-            # 重新绘制新箭头（宽度仍用初始值，不变化）
             for arrow_data in fh_arrows:
                 h = self.ax.arrow(
                     arrow_data[0], arrow_data[1], arrow_data[2], arrow_data[3],
-                    width=fh_width,  # 固定宽度，和首次绘制一致
+                    width=fh_width,
                     color=fh_color,
                     zorder=2.4,
                     alpha=0.7
                 )
                 self.plot_handles['Fh'].append(h)
 
-            # 3.3 更新铰接点标记
             for h, marker_poly in zip(self.plot_handles['hinge'], hinge_markers):
                 h.set_xy(marker_poly)
 
-            # 3.4 更新货物多边形
             if cargo_polygon and self.plot_handles['cargo']:
                 self.plot_handles['cargo'].set_xy(cargo_polygon)
             elif self.plot_handles['cargo']:
-                # 无货物时移出视野
                 self.plot_handles['cargo'].set_xy([[-1, -1], [-1, -1], [-1, -1], [-1, -1]])
 
-            # 3.5 更新车辆多边形
             for h, poly in zip(self.plot_handles['car'], car_polygons):
                 h.set_xy(poly)
 
-        # 4. 更新轨迹数据（保持原有逻辑，确保轨迹连贯）
         if len(self.trajectories['cargo']) > 1:
             cargo_traj = np.array(self.trajectories['cargo'])
             self.plot_handles['cargo_traj'].set_data(cargo_traj[:, 0], cargo_traj[:, 1])
@@ -763,17 +644,14 @@ class TwoCarrierEnv(gym.Env):
             hinge2_traj = np.array(self.trajectories['hinge2'])
             self.plot_handles['hinge2_traj'].set_data(hinge2_traj[:, 0], hinge2_traj[:, 1])
 
-        # 5. 更新坐标范围（与参考代码对齐，基于货物中心）
         X_o = self.model.x_arch[i_sim, 0]
         Y_o = self.model.x_arch[i_sim, 1]
         vis_range = self.model.config['range']
         self.ax.set_xlim([X_o - vis_range, X_o + vis_range])
         self.ax.set_ylim([Y_o - vis_range, Y_o + vis_range])
 
-        # 6. 刷新画布（高效刷新）
         self.fig.canvas.draw_idle()
 
-        # 7. rgb_array模式下保存帧（优化内存+资源释放）
         if self.render_mode == "rgb_array":
             frame = None
             buf = None
@@ -781,89 +659,61 @@ class TwoCarrierEnv(gym.Env):
             try:
                 buf = BytesIO()
                 self.fig.savefig(
-                    buf,
-                    format='png',
-                    bbox_inches='tight',
-                    dpi=96,
+                    buf, format='png', bbox_inches='tight', dpi=96,
                     facecolor=self.fig.get_facecolor()
                 )
                 buf.seek(0)
                 img = Image.open(buf).convert('RGB')
-                frame = np.array(img, dtype=np.uint8)  # 新增：指定dtype，避免高内存占用的浮点型数组
+                frame = np.array(img, dtype=np.uint8)
 
-                # 校验帧尺寸一致性（优化插值方法，减少内存占用）
                 if len(self.render_frames) > 0:
                     ref_shape = self.render_frames[0].shape
                     if frame.shape != ref_shape:
-                        # 使用INTER_AREA插值，更适合缩小/放大，内存占用更低
                         frame = cv2.resize(
-                            frame,
-                            (ref_shape[1], ref_shape[0]),
+                            frame, (ref_shape[1], ref_shape[0]),
                             interpolation=cv2.INTER_AREA
                         )
 
-                # 核心优化：限制帧缓存上限，避免内存溢出
-                max_cache_frames = 1001  # 可按需调整，超过则丢弃最早帧
+                max_cache_frames = 1001
                 if len(self.render_frames) >= max_cache_frames:
-                    self.render_frames.pop(0)  # 丢弃最早帧，保持缓存容量稳定
+                    self.render_frames.pop(0)
                 self.render_frames.append(frame)
                 return frame
             except Exception as e:
                 print(f"帧保存失败，错误：{type(e).__name__}: {e}")
             finally:
-                # 关键：显式释放资源，避免内存泄漏
-                if buf is not None:
-                    buf.close()
-                if img is not None:
-                    del img
-                if buf is not None:
-                    del buf
+                if buf is not None: buf.close()
+                if img is not None: del img
+                if buf is not None: del buf
             return frame
 
     def save_eval_video(self, eval_round=None, video_save_dir=None):
-        """
-        手动保存单轮评测的仿真视频（基于当前render_frames中的帧）
-        优化：分批写入帧+健壮编码器兼容+内存释放
-        :param eval_round: 评测轮次（用于文件名区分）
-        :param video_save_dir: 视频保存目录（默认沿用原有./output）
-        :return: 保存的视频文件路径（失败返回None）
-        """
-        # 前置校验：可视化启用、rgb_array模式、帧列表非空
         if not self.enable_visualization or self.render_mode != "rgb_array" or len(self.render_frames) == 0:
-            print("警告：不满足视频保存条件（可视化未启用/非rgb_array模式/无有效帧）")
+            print("警告：不满足视频保存条件")
             return None
         
         out = None
         try:
-            # 1. 配置视频保存目录（保持原有逻辑）
             current_dir = os.path.dirname(os.path.abspath(__file__))
             if video_save_dir is None:
-                # 优先使用Checkpoint目录（需与cfg.checkpoint.checkpoint_dir对齐）
                 default_ckpt_dir = os.path.join(current_dir, "checkpoints")
                 video_save_dir = default_ckpt_dir if os.path.exists(default_ckpt_dir) else os.path.join(current_dir, "output")
             os.makedirs(video_save_dir, exist_ok=True)
             
-            # 2. 生成带评测轮次的文件名（保持原有命名逻辑）
             time_str = datetime.datetime.now().strftime('%y%m%d%H%M%S')
-            if eval_round is not None:
-                file_prefix = f"{self.config_name}_eval_round_{eval_round}"
-            else:
-                file_prefix = f"{self.config_name}_vis"
+            file_prefix = f"{self.config_name}_eval_round_{eval_round}" if eval_round is not None else f"{self.config_name}_vis"
             file_name = f"{file_prefix}_{time_str}.mp4"
             video_path = os.path.join(video_save_dir, file_name)
             
-            # 3. 视频合成核心逻辑（优化编码器兼容+分批写入）
             fps = self.metadata['render_fps']
             height, width, _ = self.render_frames[0].shape
             video_writer_opened = False
             
-            # 第一步：尝试MP4格式（mp4v编码器）
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
             if out.isOpened():
                 video_writer_opened = True
             
-            # 第二步：MP4失败，切换AVI格式（XVID编码器，兼容性最强）
             if not video_writer_opened:
                 fourcc = cv2.VideoWriter_fourcc(*'XVID')
                 video_path = video_path.replace(".mp4", ".avi")
@@ -872,65 +722,29 @@ class TwoCarrierEnv(gym.Env):
                     video_writer_opened = True
                     print(f"mp4格式不支持，切换为avi格式，保存路径：{video_path}")
                 else:
-                    raise RuntimeError("MP4和AVI格式均无法初始化VideoWriter，编码器缺失或内存不足")
+                    raise RuntimeError("无法初始化VideoWriter")
             
-            # 4. 分批写入帧（核心优化：减少单次内存占用）
-            batch_size = 60  # 每批写入60帧，写完释放批处理内存
+            batch_size = 60
             total_frames = len(self.render_frames)
             for i in range(0, total_frames, batch_size):
-                # 提取当前批次帧
                 batch_frames = self.render_frames[i:i+batch_size]
                 for frame in batch_frames:
-                    # 格式转换（保持原有逻辑，显式指定dtype减少内存）
                     bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR).astype(np.uint8)
                     out.write(bgr_frame)
-                
-                # 打印进度（保持原有逻辑）
-                current_written = min(i + batch_size, total_frames)
-                if current_written % 100 == 0:
-                    print(f"  已写入 {current_written}/{total_frames} 帧")
-                
-                # 显式释放批处理帧内存
                 del batch_frames
             
-            # 5. 释放资源并打印结果
             out.release()
             out = None
             print(f"单轮评测视频已成功保存至: {video_path}")
             return video_path
         
         except Exception as e:
-            # 清理残留的VideoWriter资源
             if out is not None and out.isOpened():
                 out.release()
             out = None
-            print(f"生成单轮评测视频失败，详细错误信息：{type(e).__name__}: {e}")
-            
-            # 备选：保存关键帧（优化压缩，减少内存占用）
-            try:
-                key_frame_dir = os.path.join(video_save_dir or os.path.join(current_dir, "output"), "key_frames")
-                os.makedirs(key_frame_dir, exist_ok=True)
-                
-                # 优化：每10帧保存1张，增加PNG压缩参数
-                key_frame_interval = 10
-                key_frames = self.render_frames[::key_frame_interval]
-                for i, frame in enumerate(key_frames):
-                    img_name = f"eval_round_{eval_round or 'unknown'}_frame_{i:03d}.png"
-                    img_path = os.path.join(key_frame_dir, img_name)
-                    # 格式转换+压缩保存，减少磁盘占用和内存消耗
-                    bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                    cv2.imwrite(
-                        img_path,
-                        bgr_frame,
-                        [cv2.IMWRITE_PNG_COMPRESSION, 6]  # PNG压缩级别（0-9），6为平衡值
-                    )
-                
-                print(f"已保存关键帧至: {key_frame_dir}，共保存 {len(key_frames)} 张")
-            except Exception as e2:
-                print(f"保存关键帧也失败，错误：{type(e2).__name__}: {e2}")
+            print(f"生成视频失败：{e}")
             return None
         finally:
-            # 最终兜底：释放VideoWriter资源
             if out is not None and out.isOpened():
                 out.release()
     
@@ -939,225 +753,75 @@ class TwoCarrierEnv(gym.Env):
             self.render_frames = []
     
     def close(self):
-        """关闭环境并生成视频"""
         if self.fig is not None:
             plt.close(self.fig)
 
         if self.enable_visualization and self.render_mode == "rgb_array" and len(self.render_frames) > 0:
             try:
-                # 创建输出目录
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 output_dir = os.path.join(current_dir, "output")
                 os.makedirs(output_dir, exist_ok=True)
-                print(f"输出目录已准备：{output_dir}，共待写入帧数量：{len(self.render_frames)}")
-
-                # 生成视频文件名
+                
                 time_str = datetime.datetime.now().strftime(r'%y%m%d%H%M%S')
                 file_name = f"{self.config_name}_vis_{time_str}.mp4"
                 video_path = os.path.join(output_dir, file_name)
 
-                # 使用OpenCV合成视频（兼容多系统编码）
                 fps = self.metadata['render_fps']
                 height, width, _ = self.render_frames[0].shape
-                # 兼容Windows/Mac/Linux的编码格式
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4格式（优先）
-                # 备选编码：若mp4v失败，切换为XVID（avi格式）
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
                 if not out.isOpened():
                     fourcc = cv2.VideoWriter_fourcc(*'XVID')
                     video_path = video_path.replace(".mp4", ".avi")
                     out = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
-                    print(f"mp4格式不支持，切换为avi格式，保存路径：{video_path}")
 
-                # 写入帧
                 for idx, frame in enumerate(self.render_frames):
-                    # 转换为BGR格式（OpenCV要求）
                     bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                     out.write(bgr_frame)
-                    if idx % 100 == 0:
-                        print(f"已写入 {idx+1}/{len(self.render_frames)} 帧")
 
                 out.release()
                 print(f"可视化视频已成功保存至: {video_path}")
 
             except Exception as e:
-                # 暴露具体异常信息，便于排查
-                print(f"生成视频失败，详细错误信息：{type(e).__name__}: {e}")
-                # 保存单帧图像作为备选
-                try:
-                    for i, frame in enumerate(self.render_frames[::10]):  # 每10帧保存一张
-                        img_path = os.path.join(output_dir, f"frame_{i:03d}.png")
-                        cv2.imwrite(img_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                    print(f"已保存关键帧至: {output_dir}，共保存 {len(self.render_frames[::10])} 张")
-                except Exception as e2:
-                    print(f"保存关键帧也失败，错误：{type(e2).__name__}: {e2}")
-        elif self.enable_visualization and self.render_mode == "rgb_array" and len(self.render_frames) == 0:
-            print("警告：未生成任何视频帧，无法创建视频！")
-        else:
-            print("可视化功能已关闭或非rgb_array模式，不生成视频")
+                print(f"生成视频失败：{e}")
 
 
-# 注册环境（导入时自动注册）
+# 注册环境
 gym.register(
-    id="TwoCarrierEnv-v0",
+    id="TwoCarrierEnv-v1",
     entry_point="occt_2d2c:TwoCarrierEnv",
     max_episode_steps=1024,
-    kwargs={}  # 预留参数
+    kwargs={}
 )
 
-# 测试代码
 if __name__ == "__main__":
-    # ===================== 配置调整（便于测试扰动功能） =====================
-    RENDER_MODE = "rgb_array"  # 可选"human"（可视化）或"rgb_array"（保存视频）
-    ENABLE_VISUALIZATION = True  # 测试扰动时建议先关闭，避免卡顿；验证可视化时再开启
-    TEST_STEPS = 500  # 测试步数（无需跑满1000步，足够验证扰动即可）
-    SEED = 42  # 固定种子，保证扰动测试可复现
+    # 测试代码
+    RENDER_MODE = "rgb_array"
+    ENABLE_VISUALIZATION = True
+    SEED = 42
     
-    # ===================== 环境创建（保持原有逻辑，强化解包） =====================
     env = gym.make(
-        "TwoCarrierEnv-v0",
+        "TwoCarrierEnv-v1",
         render_mode=RENDER_MODE,
-        config_path=None,  # 使用默认2d2c.yaml配置
+        config_path=None,
         enable_visualization=ENABLE_VISUALIZATION
     )
-    # 必须解包获取原始环境实例（解除TimeLimit包装，才能访问扰动相关属性/记录）
     raw_env = env.unwrapped
-    print(f"=== 环境初始化完成 ===")
-    print(f"环境实例渲染模式：{raw_env.render_mode}")
-    print(f"可视化功能：{'启用' if raw_env.enable_visualization else '关闭'}")
-    print(f"原始u1_random：{raw_env.u1_random}（前轮转角初始值：{raw_env.u1_random[0]:.4f}rad）")
-    print(f"前轮转角约束：±{np.pi/6:.4f}rad（±30°）")
-    print(f"观测归一化模式：{'训练模式（可更新统计量）' if not raw_env.vecnorm_frozen else '评测模式（统计量已冻结）'}")
-    print("=" * 60)
-
-    # ===================== 步骤1：保留原有动作归一化/反归一化测试 =====================
-    print("\n--- 【原有测试】动作归一化/反归一化验证 ---")
-    original_test_action = np.array([np.pi/12, -np.pi/12, 500, 500])  # 中间值
-    print(f"原始测试动作：{original_test_action}")
-    normalized_action = raw_env.normalize_action(original_test_action)
-    print(f"归一化后动作：{normalized_action}（范围应在[-1,1]）")
-    denormalized_action = raw_env.denormalize_action(normalized_action)
-    print(f"反归一化后动作：{denormalized_action}（应与原始动作一致）")
-    print(f"归一化/反归一化误差：{np.mean(np.abs(denormalized_action - original_test_action)):.6f}")
-    print("--- 动作归一化测试完成 ---")
-    print("=" * 60)
-
-    # ===================== 步骤2：新增【观测归一化功能验证】 =====================
-    print("\n--- 【新增测试】观测归一化功能验证 ---")
-    # 重置环境（固定种子，保证可复现）
-    obs, info = env.reset(seed=SEED)
-    print(f"首次观测（归一化后）形状：{obs.shape}")
-    print(f"首次观测（归一化后）前12维：{obs[:12]}")
     
-    # 运行几步，查看归一化统计量更新
-    for step in range(5):
-        normalized_action = np.array([0, 0, 0, 0])
-        obs, reward, terminated, truncated, info = env.step(normalized_action)
-        if step == 4:
-            print(f"第5步观测（归一化后）前12维：{obs[:12]}")
-            print(f"当前归一化统计量（均值前12维）：{raw_env.vecnorm_mean[:12] if raw_env.vecnorm_mean is not None else '未初始化'}")
-            print(f"当前归一化统计量（方差前12维）：{raw_env.vecnorm_var[:12] if raw_env.vecnorm_var is not None else '未初始化'}")
-    
-    # 切换到评测模式，冻结统计量
-    raw_env.freeze_vecnorm()
-    obs_frozen, reward_frozen, terminated_frozen, truncated_frozen, info_frozen = env.step(normalized_action)
-    print(f"冻结后第一步观测（归一化后）前5维：{obs_frozen[:5]}")
-    print(f"冻结后归一化均值是否变化：{np.allclose(raw_env.vecnorm_mean, raw_env.vecnorm_mean)}（应始终为True）")
-    print("--- 观测归一化功能测试完成 ---")
-    print("=" * 60)
-
-    # ===================== 步骤3：新增【前轮转角多样性扰动专属测试】（核心修改） =====================
-    print("\n--- 【新增测试】前轮转角多样性扰动验证 ---")
-    # 重置环境（固定种子，保证可复现）
+    print("\n--- 【新版观测】后车坐标系/相对状态验证 ---")
     obs, info = env.reset(seed=SEED)
-    # 初始化记录容器，保存每一步的u1前轮转角、推力（用于后续统计）
-    steer_records = []  # 记录前轮转角（索引0）
-    thrust1_records = []  # 记录前轮推力（索引2）
-    thrust2_records = []  # 记录后轮推力（索引3）
-
-    # 运行指定步数，记录扰动数据
-    print(f"开始运行{TEST_STEPS}步仿真，记录u1扰动数据...")
-    for step in range(TEST_STEPS):
-        # 采用归一化中间值动作（避免第二辆车动作干扰u1扰动测试）
-        normalized_action = np.array([0, 0, 0, 0])
-        # 环境交互（每一步都会生成带扰动的u1）
-        obs, reward, terminated, truncated, info = env.step(normalized_action)
-        
-        # 提取并记录u1的关键数据
-        current_u1 = info['u1']
-        steer_records.append(current_u1[0])
-        thrust1_records.append(current_u1[2])
-        thrust2_records.append(current_u1[3])
-        
-        # 每100步打印一次中间结果，验证扰动有效性
-        if (step + 1) % 100 == 0:
-            print(f"  第{step+1}步 | u1前轮转角：{current_u1[0]:.4f}rad（≈{np.rad2deg(current_u1[0]):.1f}°）")
-            print(f"  第{step+1}步 | u1前后轮推力：{current_u1[2]:.1f}, {current_u1[3]:.1f}")
-            print(f"  任务终止状态：{terminated} | 截断状态：{truncated}")
-            print(f"  " + "-" * 30)
-        
-        # 若提前终止，跳出循环
-        if terminated or truncated:
-            print(f"  仿真提前终止，共运行{step+1}步")
-            break
-
-    # 转换为numpy数组，方便统计分析
-    steer_records = np.array(steer_records)
-    thrust1_records = np.array(thrust1_records)
-    thrust2_records = np.array(thrust2_records)
-
-    # 统计并打印扰动结果（验证多样性+约束有效性）
-    print("\n--- 扰动数据统计结果 ---")
-    print(f"【前轮转角（核心验证）】")
-    print(f"  取值范围：[{steer_records.min():.4f}, {steer_records.max():.4f}]rad | 对应角度：[{np.rad2deg(steer_records.min()):.1f}, {np.rad2deg(steer_records.max()):.1f}]°")
-    print(f"  均值：{steer_records.mean():.4f}rad | 标准差：{steer_records.std():.4f}rad")
-    print(f"  是否符合约束（±π/6）：{ (steer_records >= -np.pi/6).all() and (steer_records <= np.pi/6).all() }")
-    print(f"【前轮推力】")
-    print(f"  取值范围：[{thrust1_records.min():.1f}, {thrust1_records.max():.1f}]")
-    print(f"  均值：{thrust1_records.mean():.1f} | 标准差：{thrust1_records.std():.1f}")
-    print(f"【后轮推力】")
-    print(f"  取值范围：[{thrust2_records.min():.1f}, {thrust2_records.max():.1f}]")
-    print(f"  均值：{thrust2_records.mean():.1f} | 标准差：{thrust2_records.std():.1f}")
-    print("--- 前轮转角多样性扰动测试完成 ---")
-    print("=" * 60)
-
-    # ===================== 步骤4：（可选）多轮仿真验证重置有效性 =====================
-    print("\n--- 【可选测试】多轮仿真重置验证（确保扰动状态独立） ---")
-    max_episodes = 4
-    for episode in range(max_episodes):
-        print(f"\n第{episode+1}/{max_episodes}轮仿真")
-        # 重置环境（会清空上一轮的扰动状态_prev_u1_noisy）
-        obs, info = env.reset(seed=SEED + episode)  # 每轮种子偏移，避免数据重复
-        episode_steer_first = None
-        for step in range(50):  # 每轮仅运行50步
-            normalized_action = np.array([0, 0, 0, 0])
-            obs, reward, terminated, truncated, info = env.step(normalized_action)
-            if step == 0:
-                # 记录每轮第一步的前轮转角，验证重置后扰动重新初始化
-                episode_steer_first = info['u1'][0]
-                print(f"  第1步前轮转角：{episode_steer_first:.4f}rad（≈{np.rad2deg(episode_steer_first):.1f}°）")
-            if terminated or truncated:
-                break
-    print("--- 多轮仿真重置验证完成 ---")
-    print("=" * 60)
-
-    # ===================== 步骤5：保留原有环境关闭+视频生成逻辑 =====================
-    print("\n--- 环境关闭与视频生成 ---")
+    print(f"观测维度：{obs.shape} (应为12维)")
+    
+    # 打印前几维的含义
+    print(f"后车 X: {obs[0]:.2f} (VecNorm后)")
+    print(f"后车 Y: {obs[1]:.2f}")
+    print(f"后车 Psi: {obs[2]:.2f}")
+    print(f"相对角度 Psi_o_2: {obs[3]:.2f}")
+    print(f"相对角度 Psi_1_o: {obs[4]:.2f}")
+    
+    # 模拟一步
+    normalized_action = np.array([0, 0, 0, 0])
+    obs, reward, term, trunc, info = env.step(normalized_action)
+    print("Step 1 完成")
+    
     env.close()
-
-    # 规范输出提示
-    if RENDER_MODE == "rgb_array" and ENABLE_VISUALIZATION:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        output_dir = os.path.join(current_dir, "output")
-        video_files = []
-        if os.path.exists(output_dir):
-            video_files = [f for f in os.listdir(output_dir) if f.endswith(('.mp4', '.avi'))]
-        if video_files:
-            print(f"\n仿真结束！视频已保存至：{output_dir}，最新文件名：{video_files[-1]}")
-        else:
-            print("\n仿真结束！未生成视频（可视化未启用或无有效帧）")
-    elif RENDER_MODE == "human":
-        print("\n仿真结束！实时可视化窗口已关闭")
-    else:
-        print("\n仿真结束！未启用可视化功能，扰动数据已通过控制台输出验证")
-    print("=" * 60)
