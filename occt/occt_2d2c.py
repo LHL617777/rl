@@ -279,17 +279,24 @@ class TwoCarrierEnv(gym.Env):
         F_force_mag = np.hypot(Fh2_x, Fh2_y)
         
         x = self.model.x
-        Psi_cargo = x[2]
-        Psi_rear = x[4]
+        Psi_cargo = x[2]      # 货物航向
+        Psi_front = x[3]      # 前车航向 (Tractor)
+        Psi_rear = x[4]       # 后车航向 (Carrier)
         
         F_safe = self.config.get('force_safe', 2000.0) 
 
         # R_force
         r_force = -1.0 * np.tanh(F_force_mag / F_safe)
 
-        # R_align
-        delta_psi = self._normalize_angle(Psi_rear - Psi_cargo)
-        r_align = -1.0 * np.square(delta_psi)
+        # R_align_rear: 后车与货物夹角协同 (原有)
+        delta_psi_rear = self._normalize_angle(Psi_rear - Psi_cargo)
+        r_align_rear = -1.0 * np.square(delta_psi_rear)
+
+        # [新增] R_align_front: 前车与货物夹角协同
+        # 鼓励前车也尽量与货物保持一致，减少“折叠”风险
+        delta_psi_front = self._normalize_angle(Psi_front - Psi_cargo)
+        r_align_front = -1.0 * np.square(delta_psi_front)
+
 
         # R_smooth
         if i_sim > 0:
@@ -329,19 +336,22 @@ class TwoCarrierEnv(gym.Env):
         r_stability = -5.0 * np.square(Psi_dot_rear)
 
         total_reward = (1.0 * r_force) + \
-                       (1.0 * r_align) + \
+                       (1.0 * r_align_rear) + \
+                       (1.0 * r_align_front) + \
                        (2.0 * r_smooth) + \
-                       (2.0 * r_progress) + \
+                       (1.0 * r_progress) + \
                        (2.0 * r_stability)
         
         self.reward_info = {
             "r_force": r_force * 1.0,
-            "r_align": r_align * 1.0,
+            "r_align_rear": r_align_rear * 1.0,
+            "r_align_front": r_align_front * 1.0,
             "r_smooth": r_smooth * 2.0,
-            "r_progress": r_progress * 2.0,
+            "r_progress": r_progress * 1.0,
             "r_stability": r_stability * 2.0,
             "val_force": F_force_mag,
-            "val_delta_psi": delta_psi
+            "val_delta_psi_rear": delta_psi_rear,
+            "val_delta_psi_front": delta_psi_front
         }
 
         return total_reward
@@ -385,12 +395,14 @@ class TwoCarrierEnv(gym.Env):
         X2, Y2 = self.model.getXYi(self.model.x, 1)  
         info = {
             "reward_r_force": np.array(self.reward_info.get("r_force", 0.0), dtype=np.float32),
-            "reward_r_align": np.array(self.reward_info.get("r_align", 0.0), dtype=np.float32),
+            "reward_r_align_rear": np.array(self.reward_info.get("r_align_rear", 0.0), dtype=np.float32),
+            "reward_r_align_front": np.array(self.reward_info.get("r_align_front", 0.0), dtype=np.float32),
             "reward_r_smooth": np.array(self.reward_info.get("r_smooth", 0.0), dtype=np.float32),
             "reward_r_progress": np.array(self.reward_info.get("r_progress", 0.0), dtype=np.float32),
             "reward_r_stability": np.array(self.reward_info.get("r_stability", 0.0), dtype=np.float32),
             "reward_val_force": np.array(self.reward_info.get("val_force", 0.0), dtype=np.float32),
-            "reward_val_delta_psi": np.array(self.reward_info.get("val_delta_psi", 0.0), dtype=np.float32),
+            "reward_val_delta_psi_rear": np.array(self.reward_info.get("val_delta_psi_rear", 0.0), dtype=np.float32),
+            "reward_val_delta_psi_front": np.array(self.reward_info.get("val_delta_psi_front", 0.0), dtype=np.float32),
             'Fh2': (self.model.Fh_arch[self.model.count, 2], 
                     self.model.Fh_arch[self.model.count, 3]),
             'pos_error': np.hypot(X2 - X1, Y2 - Y1),
