@@ -14,11 +14,11 @@ except ImportError:
 # ===================== 配置区域 =====================
 # 填入你要统计的 5 个 Checkpoint 路径
 CHECKPOINT_PATHS = [
-    "E:\\rl\\occt\\outputs\\2026-01-11\\16-18-33\\checkpoints_occt\\checkpoint_4096000_frames.pt",
-    "E:\\rl\\occt\\outputs\\2026-01-11\\16-18-33\\checkpoints_occt\\checkpoint_4087808_frames.pt",
-    "E:\\rl\\occt\\outputs\\2026-01-11\\16-18-33\\checkpoints_occt\\checkpoint_4075520_frames.pt",
-    "E:\\rl\\occt\\outputs\\2026-01-11\\16-18-33\\checkpoints_occt\\checkpoint_4067328_frames.pt",
-    "E:\\rl\\occt\\outputs\\2026-01-11\\16-18-33\\checkpoints_occt\\checkpoint_4055040_frames.pt"
+    "E:\\rl\\occt\\outputs\\2026-01-16\\15-29-33\\checkpoints_occt\\checkpoint_307200_frames.pt",
+    "E:\\rl\\occt\\outputs\\2026-01-16\\15-29-33\\checkpoints_occt\\checkpoint_327680_frames.pt",
+    "E:\\rl\\occt\\outputs\\2026-01-16\\15-29-33\\checkpoints_occt\\checkpoint_348160_frames.pt",
+    "E:\\rl\\occt\\outputs\\2026-01-16\\15-29-33\\checkpoints_occt\\checkpoint_675840_frames.pt",
+    "E:\\rl\\occt\\outputs\\2026-01-16\\15-29-33\\checkpoints_occt\\checkpoint_655360_frames.pt",
 ]
 
 # ===================== 核心逻辑 =====================
