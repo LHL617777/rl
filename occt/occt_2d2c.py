@@ -336,7 +336,7 @@ class TwoCarrierEnv(gym.Env):
         # 1. 核心博弈目标：防折叠 (Stability)
         # 不管前车怎么乱开，后车必须把角度控制在安全范围内
         hitch_angle = self._normalize_angle(Psi_front - Psi_rear)
-        r_stability = -2.0 * np.square(hitch_angle)
+        r_stability = -10 * np.square(hitch_angle)
         
         # 2. 顺从性 (Compliance) - 最小化内力对抗
         # 如果后车转对了方向，铰接处的横向剪切力应该很小
@@ -345,7 +345,7 @@ class TwoCarrierEnv(gym.Env):
         Fh2_x = self.model.Fh_arch[i_sim, 2]
         Fh2_y = self.model.Fh_arch[i_sim, 3]
         fh_lat  = -Fh2_x * np.sin(Psi_rear) + Fh2_y * np.cos(Psi_rear)
-        r_compliance = -0.0005 * np.square(fh_lat) 
+        r_compliance = -5e-9 * np.square(fh_lat) 
         
         # 3. 辅助跟踪 (Auxiliary Tracking)
         # 如果可能，后车也尽量别偏离路中心
