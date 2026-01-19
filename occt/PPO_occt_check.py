@@ -385,8 +385,8 @@ def main(cfg: DictConfig):
         # 提取并统计 Reward 分项
         try:
             reward_keys = [
-                "reward_r_force", "reward_r_align_rear", "reward_r_align_front", "reward_r_smooth", 
-                "reward_r_progress", "reward_r_stability",
+                "reward_r_compliance", "reward_r_track", "reward_r_smooth", 
+                "reward_r_stability",
                 "reward_val_force", "reward_val_delta_psi_rear", "reward_val_delta_psi_front"
             ]
             next_td = data["next"]
