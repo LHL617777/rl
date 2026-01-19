@@ -34,21 +34,20 @@ class TwoCarrierEnv(gym.Env):
         self.model = Model2D2C(self.config)
         
         # =========================================================================================
-        # [Paper Adaptation] 状态空间重构：完全局部化 (Fully Localized Observation)
-        # 对应论文中的 Vehicle Coordinate System 转换 [cite: 140]
-        # 维度映射 (12维):
-        # [0]  Local_X_Cargo : 货物中心相对于后车的局部X坐标 (纵向距离)
-        # [1]  Local_Y_Cargo : 货物中心相对于后车的局部Y坐标 (横向偏差)
-        # [2]  V_Body_X      : 后车在自身车身坐标系下的纵向速度
-        # [3]  V_Body_Y      : 后车在自身车身坐标系下的侧滑速度
-        # [4]  Psi_o_2       : 相对角度 (货物 - 后车)
-        # [5]  Psi_1_o       : 相对角度 (前车 - 货物)
-        # [6]  Psi_dot_2     : 后车自身角速度 (Yaw Rate)
-        # [7]  Psi_dot_o_2   : 相对角速度 (货物 - 后车)
-        # [8]  Psi_dot_1_o   : 相对角速度 (前车 - 货物)
-        # [9]  Fh_Long       : 铰接力在后车坐标系下的纵向分量
-        # [10] Fh_Lat        : 铰接力在后车坐标系下的横向分量
-        # [11] Placeholder   : 预留位 (如前车距离等，目前为0.0)
+        # ================== 1. 状态空间 (12维 - Rear/Follower View) ==================
+        # 移除了 Human_Steer，增加了路径跟踪和力变化率信息
+        # [0]    Hitch_Angle       : 铰接角 (前车 - 后车) -> 安全核心
+        # [1]    Omega_Rear        : 后车角速度
+        # [2]    Omega_Diff        : 角速度差 (前 - 后) -> 折叠趋势
+        # [3]    V_Rear_Body_X     : 后车纵向速度
+        # [4]    V_Rear_Body_Y     : 后车侧滑速度
+        # [5]    Fh_Rear_Long      : 纵向牵引力
+        # [6]    Fh_Rear_Lat       : 横向撕裂力 (意图感知的核心替代品)
+        # [7]    Risk_Predict      : 预测未来1s的折叠风险
+        # [8]    Local_Cargo_X     : 货物相对后车的 X (后车也要看路)
+        # [9]    Local_Cargo_Y     : 货物相对后车的 Y (横向偏差)
+        # [10]   Heading_Err_Cargo : 后车与货物路径的夹角
+        # [11]   dFh_Lat           : 横向力变化率 (Jerk Sensing) -> 感知前车是否急打方向
         # =========================================================================================
         
         # 定义物理边界（主要用于参考，VecNorm会处理实际数值范围）
@@ -84,6 +83,13 @@ class TwoCarrierEnv(gym.Env):
             high=np.ones(4, dtype=np.float64),
             dtype=np.float64
         )
+
+        # 缓存上一帧的力，用于计算变化率
+        self.last_Fh_lat = 0.0
+
+        # 人类驾驶参数
+        self.human_noise_std = 0.03   # 正常驾驶的抖动
+        self.human_panic_prob = 0.02  # 出现“惊慌失措”急转弯的概率
         
         self.u1_random = np.array([0, 0, 1e3, 1e3])
         self.steer_episode_base_std = np.pi/15
@@ -212,60 +218,104 @@ class TwoCarrierEnv(gym.Env):
         y_local = -dx * np.sin(psi_self) + dy * np.cos(psi_self)
         return x_local, y_local
     
+    def _get_human_action(self, obs_state):
+        """
+        [Adversarial Human Driver]
+        模拟一个有噪声的人类驾驶员。
+        博弈点：他并不总是完美的，有时会犯错（噪声），Agent必须容忍这些错误。
+        """
+        x = obs_state
+        target_x, target_y = x[0], x[1] # 货物中心作为目标
+        
+        self_x, self_y = self.model.getXYi(x, 0) # 前车位置
+        psi_front = x[3]
+        
+        # 1. 基础驾驶逻辑 (Pure Pursuit)
+        dx = target_x - self_x
+        dy = target_y - self_y
+        target_angle = np.arctan2(dy, dx)
+        steer_error = self._normalize_angle(target_angle - psi_front)
+        
+        kp = 0.8
+        base_steer = np.clip(kp * steer_error, -np.pi/6, np.pi/6)
+        
+        # 2. [博弈对抗] 注入人类的不确定性
+        # 正常抖动
+        noise = self.rng.normal(0, self.human_noise_std)
+        
+        # "惊慌时刻" (Panic Moment) - 模拟突然避让或操作失误
+        # 这是对后车Robustness的最大考验
+        if self.rng.random() < self.human_panic_prob:
+            panic_steer = self.rng.choice([-0.3, 0.3]) # 突然大幅度打方向
+            noise += panic_steer
+            
+        final_steer = np.clip(base_steer + noise, -np.pi/6, np.pi/6)
+        
+        # 简单的定速巡航
+        throttle = 300.0 
+        
+        return np.array([final_steer, 0, throttle, 0])
+    
     def _get_observation(self):
         """
-        Paper Implementation: Fully Localized Observation
+        [Follower View - 12 Dim]
+        无法获取前车转向，必须通过物理量的变化来感知。
         """
         x = self.model.x
         i_sim = self.model.count
-        idx_rear = 1 
         
-        # 1. 后车全局状态
-        X_2, Y_2 = self.model.getXYi(x, idx_rear)
-        Psi_2 = x[4]
-        X_dot_2, Y_dot_2 = self.model.getXYdoti(x, idx_rear)
+        # 状态提取
+        X_cargo, Y_cargo = x[0], x[1]
+        Psi_cargo = x[2]
+        Psi_1 = x[3] # Front
+        Psi_2 = x[4] # Rear (Self)
+        Psi_dot_1 = x[8]
         Psi_dot_2 = x[9]
         
-        # 2. 目标点(货物)全局状态
-        X_cargo = x[0]
-        Y_cargo = x[1]
+        X_2, Y_2 = self.model.getXYi(x, 1) # Rear Pos
+        X_dot_2, Y_dot_2 = self.model.getXYdoti(x, 1)
         
-        # --- 核心：坐标转换 ---
-        # (1) 位置局部化
-        local_x_cargo, local_y_cargo = self._transform_to_local(
-            X_cargo, Y_cargo, X_2, Y_2, Psi_2
-        )
+        # --- 1. 铰接状态 (安全核心) ---
+        hitch_angle = self._normalize_angle(Psi_1 - Psi_2)
+        omega_diff = Psi_dot_1 - Psi_dot_2
         
-        # (2) 速度局部化 (Body Frame Velocity)
+        # --- 2. 自身动力学 ---
         vx_body = X_dot_2 * np.cos(Psi_2) + Y_dot_2 * np.sin(Psi_2)
         vy_body = -X_dot_2 * np.sin(Psi_2) + Y_dot_2 * np.cos(Psi_2)
-
-        # 3. 相对状态
-        Psi_o = x[2]
-        Psi_1 = x[3]
-        Psi_o_2 = self._normalize_angle(Psi_o - Psi_2)
-        Psi_1_o = self._normalize_angle(Psi_1 - Psi_o)
         
-        Psi_dot_o = x[7]
-        Psi_dot_1 = x[8]
-        Psi_dot_o_2 = Psi_dot_o - Psi_dot_2
-        Psi_dot_1_o = Psi_dot_1 - Psi_dot_o
-        
-        # 4. 铰接力局部化
-        Fh2_x = self.model.Fh_arch[i_sim, 2]
+        # --- 3. 意图感知 (Force Sensing) ---
+        Fh2_x = self.model.Fh_arch[i_sim, 2] 
         Fh2_y = self.model.Fh_arch[i_sim, 3]
-        Fh_longitudinal = Fh2_x * np.cos(Psi_2) + Fh2_y * np.sin(Psi_2)
-        Fh_lateral      = -Fh2_x * np.sin(Psi_2) + Fh2_y * np.cos(Psi_2)
+        # 投影到后车坐标系
+        fh_long = Fh2_x * np.cos(Psi_2) + Fh2_y * np.sin(Psi_2)
+        fh_lat  = -Fh2_x * np.sin(Psi_2) + Fh2_y * np.cos(Psi_2)
+        
+        # 计算横向力变化率 (Jerk) - 这是感知前车急转向的“替代传感器”
+        dfh_lat = fh_lat - self.last_Fh_lat
+        self.last_Fh_lat = fh_lat # 更新缓存
+        
+        # --- 4. 风险预测 ---
+        risk_pred = hitch_angle + omega_diff * 1.0
+        
+        # --- 5. 路径跟踪 (后车也要看路) ---
+        # 即使是被拉着走，后车也应该知道自己在路的哪一边
+        loc_x_cargo, loc_y_cargo = self._transform_to_local(X_cargo, Y_cargo, X_2, Y_2, Psi_2)
+        heading_err_cargo = self._normalize_angle(Psi_2 - Psi_cargo)
 
         # 组装 12维 向量
         raw_obs = np.array([
-            local_x_cargo, local_y_cargo, # [0-1] 位置 (局部)
-            vx_body, vy_body,             # [2-3] 速度 (局部)
-            Psi_o_2, Psi_1_o,             # [4-5] 角度 (相对)
-            Psi_dot_2,                    # [6]   角速度
-            Psi_dot_o_2, Psi_dot_1_o,     # [7-8] 角速度 (相对)
-            Fh_longitudinal, Fh_lateral,  # [9-10] 力 (局部)
-            0.0                           # [11] Placeholder
+            hitch_angle,        # [0] 铰接角
+            Psi_dot_2,          # [1] 自身角速度
+            omega_diff,         # [2] 相对角速度
+            vx_body,            # [3] 自身Vx
+            vy_body,            # [4] 自身Vy (侧滑)
+            fh_long,            # [5] 牵引力
+            fh_lat,             # [6] 侧向力 (意图感知)
+            risk_pred,          # [7] 风险预测
+            loc_x_cargo,        # [8] 相对路 X
+            loc_y_cargo,        # [9] 相对路 Y (偏差)
+            heading_err_cargo,  # [10] 相对路朝向
+            dfh_lat             # [11] 侧力变化率 (Action Inference)
         ], dtype=np.float64)
         
         self._update_vecnorm_stats(raw_obs)
@@ -282,6 +332,30 @@ class TwoCarrierEnv(gym.Env):
         Psi_cargo = x[2]      # 货物航向
         Psi_front = x[3]      # 前车航向 (Tractor)
         Psi_rear = x[4]       # 后车航向 (Carrier)
+
+        # 1. 核心博弈目标：防折叠 (Stability)
+        # 不管前车怎么乱开，后车必须把角度控制在安全范围内
+        hitch_angle = self._normalize_angle(Psi_front - Psi_rear)
+        r_stability = -2.0 * np.square(hitch_angle)
+        
+        # 2. 顺从性 (Compliance) - 最小化内力对抗
+        # 如果后车转对了方向，铰接处的横向剪切力应该很小
+        # 这意味着后车“顺”着前车的意图在走
+        i_sim = self.model.count
+        Fh2_x = self.model.Fh_arch[i_sim, 2]
+        Fh2_y = self.model.Fh_arch[i_sim, 3]
+        fh_lat  = -Fh2_x * np.sin(Psi_rear) + Fh2_y * np.cos(Psi_rear)
+        r_compliance = -0.0005 * np.square(fh_lat) 
+        
+        # 3. 辅助跟踪 (Auxiliary Tracking)
+        # 如果可能，后车也尽量别偏离路中心
+        target_x, target_y = x[0], x[1]
+        self_x, self_y = self.model.getXYi(x, 1)
+        # 这里用一种软约束，不要因为为了对齐路而跟前车较劲
+        dist_to_cargo = np.hypot(target_x - self_x, target_y - self_y)
+        # 我们只惩罚横向偏差，不惩罚纵向距离(因为必须跟着前车)
+        # 这是一个近似的横向偏差惩罚
+        r_track = -0.1 * dist_to_cargo
         
         F_safe = self.config.get('force_safe', 2000.0) 
 
@@ -308,9 +382,8 @@ class TwoCarrierEnv(gym.Env):
         else:
             r_smooth = 0.0
 
-        # R_progress: 向量投影 (Vector Projection) [cite: 195]
-        X1_target, Y1_target = self.model.getXYi(x, 0) # 使用前车作为牵引方向参考，或者货物中心
-        # 为了简单，这里还是用货物中心
+        # R_progress: 向量投影 (Vector Projection)
+        # 用货物中心
         target_x, target_y = x[0], x[1]
         self_x, self_y = self.model.getXYi(x, 1)
         
@@ -331,24 +404,17 @@ class TwoCarrierEnv(gym.Env):
         else:
             r_progress = 0.0
         
-        # R_stability
-        Psi_dot_rear = self.model.x[9]
-        r_stability = -5.0 * np.square(Psi_dot_rear)
+        # # R_stability
+        # Psi_dot_rear = self.model.x[9]
+        # r_stability = -5.0 * np.square(Psi_dot_rear)
 
-        total_reward = (1.0 * r_force) + \
-                       (1.0 * r_align_rear) + \
-                       (1.0 * r_align_front) + \
-                       (2.0 * r_smooth) + \
-                       (1.0 * r_progress) + \
-                       (2.0 * r_stability)
+        total_reward = r_stability + r_compliance + r_track + r_smooth
         
         self.reward_info = {
-            "r_force": r_force * 1.0,
-            "r_align_rear": r_align_rear * 1.0,
-            "r_align_front": r_align_front * 1.0,
-            "r_smooth": r_smooth * 2.0,
-            "r_progress": r_progress * 1.0,
-            "r_stability": r_stability * 2.0,
+            "r_stability": r_stability * 1.0,
+            "r_compliance": r_compliance * 1.0,
+            "r_track": r_track * 1.0,
+            "r_smooth": r_smooth * 1.0,
             "val_force": F_force_mag,
             "val_delta_psi_rear": delta_psi_rear,
             "val_delta_psi_front": delta_psi_front
@@ -375,11 +441,16 @@ class TwoCarrierEnv(gym.Env):
         return u1_noisy.astype(np.float64)
     
     def step(self, action):
-        original_action = self.denormalize_action(action)
-        u1 = self._get_noisy_u1()
-        u = np.concatenate([u1, original_action])
+        # 1. 人类驾驶前车 (Stochastic Leader)
+        u1_human = self._get_human_action(self.model.x)
         
-        self.model.step(u)
+        # 2. Agent 辅助后车 (Defender Follower)
+        u2_agent = self.denormalize_action(action)
+        
+        # 3. 物理步进
+        u_total = np.concatenate([u1_human, u2_agent])
+        self.model.step(u_total)
+
         observation = self._get_observation()
         reward = self._calculate_reward()
         self._record_trajectories()
@@ -394,11 +465,9 @@ class TwoCarrierEnv(gym.Env):
         X1, Y1 = self.model.getXYi(self.model.x, 0)
         X2, Y2 = self.model.getXYi(self.model.x, 1)  
         info = {
-            "reward_r_force": np.array(self.reward_info.get("r_force", 0.0), dtype=np.float32),
-            "reward_r_align_rear": np.array(self.reward_info.get("r_align_rear", 0.0), dtype=np.float32),
-            "reward_r_align_front": np.array(self.reward_info.get("r_align_front", 0.0), dtype=np.float32),
+            "reward_r_compliance": np.array(self.reward_info.get("r_compliance", 0.0), dtype=np.float32),
+            "reward_r_track": np.array(self.reward_info.get("r_track", 0.0), dtype=np.float32),
             "reward_r_smooth": np.array(self.reward_info.get("r_smooth", 0.0), dtype=np.float32),
-            "reward_r_progress": np.array(self.reward_info.get("r_progress", 0.0), dtype=np.float32),
             "reward_r_stability": np.array(self.reward_info.get("r_stability", 0.0), dtype=np.float32),
             "reward_val_force": np.array(self.reward_info.get("val_force", 0.0), dtype=np.float32),
             "reward_val_delta_psi_rear": np.array(self.reward_info.get("val_delta_psi_rear", 0.0), dtype=np.float32),
@@ -406,9 +475,9 @@ class TwoCarrierEnv(gym.Env):
             'Fh2': (self.model.Fh_arch[self.model.count, 2], 
                     self.model.Fh_arch[self.model.count, 3]),
             'pos_error': np.hypot(X2 - X1, Y2 - Y1),
-            'u1': u1,
+            'u1': u1_human,
             'u2_normalized': action,
-            'u2_original': original_action,
+            'u2_original': self.denormalize_action(action),
             'x': np.array([X1, Y1, X2, Y2]),
             "hinge_force_penalty": self.hinge_force_penalty,
             "control_smooth_penalty": self.control_smooth_penalty
@@ -426,67 +495,64 @@ class TwoCarrierEnv(gym.Env):
             info['termination_reason'] = 'force_limit'
         else:
             info['termination_reason'] = 'time_limit'
-
+        
+        if np.abs(observation[0]) > np.pi/2.5: 
+            terminated = True
+            reward -= 2000.0 
+            info['termination_reason'] = 'excessive_hitch_angle'
+        
         return observation, reward, terminated, truncated, info
 
     def reset(self, seed=None, options=None, clear_frames=None):
         super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
-        super().reset(seed=seed)
-        if seed is not None:
-            self.rng = np.random.default_rng(seed)
             
-        # ================== 【新增】在这里实现每回合随机速度 ==================
-        # 这样每次环境重置，速度都是新的（例如第一把 0.3，第二把 0.8）
-        v_init = self.rng.uniform(0.2, 1.0) 
-        psi_init = self.config['Psi_o_0'] 
+        # ================== 1. 随机化初始状态 ==================
+        # 模拟不同的入弯速度和初始偏差
+        v_init = self.rng.uniform(0.5, 1.2)
+        psi_init = self.rng.uniform(-0.3, 0.3)
         
-        vx_init = v_init * np.cos(psi_init)
-        vy_init = v_init * np.sin(psi_init)
-        
-        # 更新 Config，这样重新生成 Model 时会用到新参数
-        self.config['X_dot_o_0'] = vx_init
-        self.config['Y_dot_o_0'] = vy_init
-        # ================================================================
+        # 更新 Config (确保重新初始化的 Model 使用新参数)
+        self.config['X_dot_o_0'] = v_init * np.cos(psi_init)
+        self.config['Y_dot_o_0'] = v_init * np.sin(psi_init)
+        self.config['Psi_o_0'] = psi_init
+        self.config['Psi_1_0'] = psi_init 
+        self.config['Psi_2_0'] = 0.0
 
-        # 重新初始化模型（或者仅重置状态，取决于你的实现偏好）
-        # 推荐保留这行，确保模型参数彻底更新
+        # ================== 2. 重新初始化物理模型 ==================
         self.model = Model2D2C(self.config)
-        self.steer_episode_offset = self.rng.normal(
-            loc=0, 
-            scale=self.steer_episode_base_std
-        )
-        self.steer_episode_offset = np.clip(
-            self.steer_episode_offset,
-            self.steer_min_bound,
-            self.steer_max_bound
-        )
-        if hasattr(self, '_prev_u1_noisy'): del self._prev_u1_noisy
+        # 双重保险：强制覆盖状态向量
+        self.model.x[3] = psi_init
+        self.model.x[5] = v_init * np.cos(psi_init)
+        self.model.x[6] = v_init * np.sin(psi_init)
         
-        if not self.vecnorm_frozen:
-            # Warmup
-            zero_action = np.zeros(4)
-            for _ in range(5):
-                self.model.step(np.concatenate([self.u1_random, zero_action]))
-                _ = self._get_observation()
+        # 重置力缓存 (用于计算 dfh_lat)
+        self.last_Fh_lat = 0.0 
+        
+        # ================== 3. 物理热身 (Physical Warmup) ==================
+        # 【关键修改】无论是否训练，都必须跑几步！
+        # 原因：我们需要填充 self.last_Fh_lat，否则第一帧的力变化率会是巨大的跳变。
+        warmup_steps = 5
+        u2_passive = np.zeros(4) # 后车在热身阶段不动作
+        
+        for _ in range(warmup_steps):
+            # 获取人类驾驶动作 (前车)
+            u1_human = self._get_human_action(self.model.x)
             
-            # Reset Model State
-            self.model.count = 0
-            self.model.x = np.array([
-                self.config['X_o_0'], self.config['Y_o_0'], self.config['Psi_o_0'],
-                self.config['Psi_1_0'], self.config['Psi_2_0'],
-                self.config['X_dot_o_0'],   # 修复：使用配置的 VX
-                self.config['Y_dot_o_0'],   # 修复：使用配置的 VY
-                self.config['Psi_dot_o_0'], # 修复：使用配置的 角速度
-                self.config['Psi_dot_1_0'], 
-                self.config['Psi_dot_2_0'], 
-            ], dtype=np.float64)
-            self.model.x_arch[0, :] = self.model.x
-            self.model.u_arch.fill(0) 
-            self.model.Fh_arch.fill(0)
-            if self.enable_visualization: self._reset_visualization()
+            # 物理步进
+            self.model.step(np.concatenate([u1_human, u2_passive]))
+            
+            # 调用观测函数：
+            # 1. 它会计算当前的力 Fh_lat
+            # 2. 它会更新 self.last_Fh_lat = Fh_lat
+            # 3. 如果没冻结，它还会更新 VecNorm 统计量
+            _ = self._get_observation()
+            
+        # 【注意】热身结束后，不要再重置 self.model.x！
+        # 我们直接从第 5 步开始 Episode，这样力反馈才是连续的，符合物理规律。
 
+        # ================== 4. 可视化与清理 ==================
         options = options or {}
         final_clear_frames = options.get("clear_frames", clear_frames if clear_frames is not None else False)
         
@@ -497,9 +563,13 @@ class TwoCarrierEnv(gym.Env):
                 'cargo': [], 'car1': [], 'car2': [], 'hinge1': [], 'hinge2': []
             }
             self._reset_visualization() 
+            
         self.is_sim_finished = False
+        
+        # 获取正式的第一帧观测
         observation = self._get_observation()
         self._record_trajectories()
+        
         return observation, {}
 
     def freeze_vecnorm(self):
