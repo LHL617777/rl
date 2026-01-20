@@ -322,102 +322,77 @@ class TwoCarrierEnv(gym.Env):
         return self._normalize_observation(raw_obs)
     
     def _calculate_reward(self):
-        """Physics-Feedback Reward with Progress Projection"""
+        """
+        [Final Recommended] Simplified Reward Structure
+        Phase 1 Training: Focus on functionality (Moving safely).
+        """
+        # ================== 1. 物理量提取 ==================
         i_sim = self.model.count
+        x = self.model.x
+        
+        target_x, target_y = x[0], x[1]
+        self_x, self_y = self.model.getXYi(x, 1)
+        
+        # 力学
         Fh2_x = self.model.Fh_arch[i_sim, 2]
         Fh2_y = self.model.Fh_arch[i_sim, 3]
         F_force_mag = np.hypot(Fh2_x, Fh2_y)
+        F_safe = self.config.get('force_safe', 2000.0)
+
+        # ================== 2. 核心项计算 ==================
         
-        x = self.model.x
-        Psi_cargo = x[2]      # 货物航向
-        Psi_front = x[3]      # 前车航向 (Tractor)
-        Psi_rear = x[4]       # 后车航向 (Carrier)
-
-        # 1. 核心博弈目标：防折叠 (Stability)
-        # 不管前车怎么乱开，后车必须把角度控制在安全范围内
-        hitch_angle = self._normalize_angle(Psi_front - Psi_rear)
-        r_stability = -10 * np.square(hitch_angle)
-        
-        # 2. 顺从性 (Compliance) - 最小化内力对抗
-        # 如果后车转对了方向，铰接处的横向剪切力应该很小
-        # 这意味着后车“顺”着前车的意图在走
-        i_sim = self.model.count
-        Fh2_x = self.model.Fh_arch[i_sim, 2]
-        Fh2_y = self.model.Fh_arch[i_sim, 3]
-        fh_lat  = -Fh2_x * np.sin(Psi_rear) + Fh2_y * np.cos(Psi_rear)
-        r_compliance = -5e-9 * np.square(fh_lat) 
-        
-        # 3. 辅助跟踪 (Auxiliary Tracking)
-        # 如果可能，后车也尽量别偏离路中心
-        target_x, target_y = x[0], x[1]
-        self_x, self_y = self.model.getXYi(x, 1)
-        # 这里用一种软约束，不要因为为了对齐路而跟前车较劲
-        dist_to_cargo = np.hypot(target_x - self_x, target_y - self_y)
-        # 我们只惩罚横向偏差，不惩罚纵向距离(因为必须跟着前车)
-        # 这是一个近似的横向偏差惩罚
-        r_track = -0.1 * dist_to_cargo
-        
-        F_safe = self.config.get('force_safe', 2000.0) 
-
-        # R_force
-        r_force = -1.0 * np.tanh(F_force_mag / F_safe)
-
-        # R_align_rear: 后车与货物夹角协同 (原有)
-        delta_psi_rear = self._normalize_angle(Psi_rear - Psi_cargo)
-        r_align_rear = -1.0 * np.square(delta_psi_rear)
-
-        # [新增] R_align_front: 前车与货物夹角协同
-        # 鼓励前车也尽量与货物保持一致，减少“折叠”风险
-        delta_psi_front = self._normalize_angle(Psi_front - Psi_cargo)
-        r_align_front = -1.0 * np.square(delta_psi_front)
-
-
-        # R_smooth
-        if i_sim > 0:
-            u_curr = self.model.u_arch[i_sim, 4:8]
-            u_prev = self.model.u_arch[i_sim - 1, 4:8]
-            steer_diff = np.sum(np.abs(u_curr[:2] - u_prev[:2]))
-            thrust_diff = np.sum(np.abs(u_curr[2:] - u_prev[2:])) / 1000.0
-            r_smooth = -0.1 * (5.0 * steer_diff + 0.5 * thrust_diff)
-        else:
-            r_smooth = 0.0
-
-        # R_progress: 向量投影 (Vector Projection)
-        # 用货物中心
-        target_x, target_y = x[0], x[1]
-        self_x, self_y = self.model.getXYi(x, 1)
-        
+        # [1] Progress (动力): 只要动就有分
         vec_x = target_x - self_x
         vec_y = target_y - self_y
-        dist = np.hypot(vec_x, vec_y)
-        
-        if dist > 1e-3:
-            dir_x, dir_y = vec_x / dist, vec_y / dist
+        dist_vec = np.hypot(vec_x, vec_y)
+        if dist_vec > 1e-3:
+            dir_x, dir_y = vec_x / dist_vec, vec_y / dist_vec
         else:
             dir_x, dir_y = 0, 0
-            
         X_dot_2, Y_dot_2 = self.model.getXYdoti(x, 1)
+        
+        # 投影速度
         v_effective = X_dot_2 * dir_x + Y_dot_2 * dir_y
-        
-        if F_force_mag < F_safe:
-            r_progress = 0.2 * v_effective 
-        else:
-            r_progress = 0.0
-        
-        # # R_stability
-        # Psi_dot_rear = self.model.x[9]
-        # r_stability = -5.0 * np.square(Psi_dot_rear)
+        r_progress = v_effective 
 
-        total_reward = r_stability + r_compliance + r_track + r_smooth
+        # [2] Force (物理硬约束): 只要总力小，一切都好
+        r_force = -1.0 * np.square(F_force_mag / F_safe)
+
+        # [3] Stability (几何硬约束): 防折叠
+        Psi_front = x[3]
+        Psi_rear = x[4]
+        hitch_angle = self._normalize_angle(Psi_front - Psi_rear)
+        r_stability = -1.0 * np.square(hitch_angle)
+        
+        # [4] Track (导航软约束): 知道路在哪
+        r_track = -1.0 * dist_vec
+
+        # [5] Alive (生存): 只要不熔断
+        r_alive = 0.05
+
+        # ================== 3. 权重配置 (Phase 1) ==================
+        
+        w_progress  = 2.0   # [核心] 加大动力，先让车跑起来！
+        w_force     = 0.05   # [约束] 适当约束，不要太严厉
+        w_stability = 0.5   # [约束] 适当约束
+        w_track     = 0.1   # [辅助] 权重低，跟着前车走是第一位的，对齐路是第二位的
+        
+        # ================== 4. 总分 ==================
+        
+        total_reward = (w_progress * r_progress) + \
+                       (w_force * r_force) + \
+                       (w_stability * r_stability) + \
+                       (w_track * r_track) + \
+                       r_alive
         
         self.reward_info = {
-            "r_stability": r_stability * 1.0,
-            "r_compliance": r_compliance * 1.0,
-            "r_track": r_track * 1.0,
-            "r_smooth": r_smooth * 1.0,
+            "r_progress": w_progress * r_progress,
+            "r_force": w_force * r_force,
+            "r_stability": w_stability * r_stability,
+            "r_track": w_track * r_track,
+            "r_alive": r_alive,
             "val_force": F_force_mag,
-            "val_delta_psi_rear": delta_psi_rear,
-            "val_delta_psi_front": delta_psi_front
+            "total": total_reward
         }
 
         return total_reward
@@ -462,44 +437,55 @@ class TwoCarrierEnv(gym.Env):
         
         terminated = self.model.is_finish
         truncated = False
+        
+        # 获取位置用于 info 记录
         X1, Y1 = self.model.getXYi(self.model.x, 0)
         X2, Y2 = self.model.getXYi(self.model.x, 1)  
+        
         info = {
-            "reward_r_compliance": np.array(self.reward_info.get("r_compliance", 0.0), dtype=np.float32),
-            "reward_r_track": np.array(self.reward_info.get("r_track", 0.0), dtype=np.float32),
-            "reward_r_smooth": np.array(self.reward_info.get("r_smooth", 0.0), dtype=np.float32),
-            "reward_r_stability": np.array(self.reward_info.get("r_stability", 0.0), dtype=np.float32),
-            "reward_val_force": np.array(self.reward_info.get("val_force", 0.0), dtype=np.float32),
-            "reward_val_delta_psi_rear": np.array(self.reward_info.get("val_delta_psi_rear", 0.0), dtype=np.float32),
-            "reward_val_delta_psi_front": np.array(self.reward_info.get("val_delta_psi_front", 0.0), dtype=np.float32),
-            'Fh2': (self.model.Fh_arch[self.model.count, 2], 
-                    self.model.Fh_arch[self.model.count, 3]),
-            'pos_error': np.hypot(X2 - X1, Y2 - Y1),
-            'u1': u1_human,
-            'u2_normalized': action,
-            'u2_original': self.denormalize_action(action),
-            'x': np.array([X1, Y1, X2, Y2]),
-            "hinge_force_penalty": self.hinge_force_penalty,
-            "control_smooth_penalty": self.control_smooth_penalty
+            "reward_total": np.array(self.reward_info.get("total", 0.0), dtype=np.float32),
+            "reward_progress": np.array(self.reward_info.get("r_progress", 0.0), dtype=np.float32),
+            "reward_force": np.array(self.reward_info.get("r_force", 0.0), dtype=np.float32),
+            "reward_stability": np.array(self.reward_info.get("r_stability", 0.0), dtype=np.float32),
+            "reward_track": np.array(self.reward_info.get("r_track", 0.0), dtype=np.float32),
+            "reward_alive": np.array(self.reward_info.get("r_alive", 0.0), dtype=np.float32),
+            
+            # 物理数值
+            "val_force": np.array(self.reward_info.get("val_force", 0.0), dtype=np.float32),
+            
+            # 调试信息 (数组原本就是 numpy 类型，无需转换，但为了保险可以强转)
+            'u1': np.array(u1_human, dtype=np.float32),
+            'u2_raw': np.array(self.denormalize_action(action), dtype=np.float32),
+            'pos_error': np.array(np.hypot(X2 - X1, Y2 - Y1), dtype=np.float32)
         }
         
+
         # 物理熔断
         Fh2_x = self.model.Fh_arch[self.model.count, 2]
         Fh2_y = self.model.Fh_arch[self.model.count, 3]
         current_force = np.hypot(Fh2_x, Fh2_y)
+        
+        # 阈值设置
         FORCE_TERMINATE_THRESHOLD = 10000.0 
+        ANGLE_TERMINATE_THRESHOLD = np.pi / 2.5 # 72度
+        
+        # 这里的惩罚 -100 已经足够大（相当于跑了 50-100 步白跑了）
+        # 不要设成 -2000，那会让 Agent 极度保守
+        TERMINAL_PENALTY = -100.0 
         
         if current_force > FORCE_TERMINATE_THRESHOLD:
             terminated = True
-            reward -= 2000.0 
+            reward += TERMINAL_PENALTY # 加上负分
             info['termination_reason'] = 'force_limit'
-        else:
-            info['termination_reason'] = 'time_limit'
         
-        if np.abs(observation[0]) > np.pi/2.5: 
+        elif np.abs(observation[0]) > ANGLE_TERMINATE_THRESHOLD: 
+            # observation[0] 是 hitch_angle
             terminated = True
-            reward -= 2000.0 
+            reward += TERMINAL_PENALTY
             info['termination_reason'] = 'excessive_hitch_angle'
+            
+        else:
+            info['termination_reason'] = 'time_limit' # 或者是 normal
         
         return observation, reward, terminated, truncated, info
 

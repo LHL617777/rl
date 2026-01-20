@@ -385,10 +385,13 @@ def main(cfg: DictConfig):
         # 提取并统计 Reward 分项
         try:
             reward_keys = [
-                "reward_r_compliance", "reward_r_track", "reward_r_smooth", 
-                "reward_r_stability",
-                "reward_val_force", "reward_val_delta_psi_rear", "reward_val_delta_psi_front"
-            ]
+                "reward_total", 
+                "reward_progress", 
+                "reward_force",  
+                "reward_stability",
+                "reward_track",
+                "reward_alive"
+                ]
             next_td = data["next"]
             for key in reward_keys:
                 if key in next_td.keys():

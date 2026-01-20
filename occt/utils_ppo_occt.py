@@ -71,13 +71,12 @@ def make_env(
     # 使用 default_info_dict_reader(["key"]) 来生成这个函数。
     # 这会告诉 TorchRL："请生成一个函数，这个函数专门去 info 里抓取 'reward_details' 字段"
     reward_keys = [
-        "reward_r_compliance", 
-        "reward_r_track", 
-        "reward_r_smooth",  
-        "reward_r_stability",
-        "reward_val_force",
-        "reward_val_delta_psi_rear",
-        "reward_val_delta_psi_front"
+        "reward_total", 
+        "reward_progress", 
+        "reward_force",  
+        "reward_stability",
+        "reward_track",
+        "reward_alive"
     ]
     base_env.set_info_dict_reader(
         info_dict_reader=default_info_dict_reader(reward_keys)
