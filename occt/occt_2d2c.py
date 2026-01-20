@@ -272,7 +272,13 @@ class TwoCarrierEnv(gym.Env):
         return self._normalize_observation(raw_obs)
     
     def _calculate_reward(self):
-        """Physics-Feedback Reward with Progress Projection"""
+        """
+        Optimized Reward: Balance Progress vs. Constraints
+        核心思路：
+        1. 正向激励 (Progress) 必须是主导项。
+        2. 移除硬截断 (Hard Cut-off)，改为软约束。
+        3. 大幅降低辅助惩罚项 (Smooth, Stability) 的权重，避免 Agent 因噎废食。
+        """
         i_sim = self.model.count
         Fh2_x = self.model.Fh_arch[i_sim, 2]
         Fh2_y = self.model.Fh_arch[i_sim, 3]
@@ -280,24 +286,59 @@ class TwoCarrierEnv(gym.Env):
         
         x = self.model.x
         Psi_cargo = x[2]      # 货物航向
-        Psi_front = x[3]      # 前车航向 (Tractor)
-        Psi_rear = x[4]       # 后车航向 (Carrier)
+        Psi_front = x[3]      # 前车航向
+        Psi_rear = x[4]       # 后车航向
         
         F_safe = self.config.get('force_safe', 2000.0) 
 
-        # R_force
-        r_force = -1.0 * np.tanh(F_force_mag / F_safe)
+        # ============================================================
+        # 1. Progress Reward (正向主驱动力) - 核心修改
+        # ============================================================
+        X_dot_2, Y_dot_2 = self.model.getXYdoti(x, 1)
+        
+        # 计算目标方向向量
+        target_x, target_y = x[0], x[1] # 货物中心
+        self_x, self_y = self.model.getXYi(x, 1) # 后车中心
+        vec_x = target_x - self_x
+        vec_y = target_y - self_y
+        dist = np.hypot(vec_x, vec_y)
+        
+        if dist > 1e-3:
+            dir_x, dir_y = vec_x / dist, vec_y / dist
+        else:
+            dir_x, dir_y = 0, 0
+            
+        # 有效速度投影
+        v_effective = X_dot_2 * dir_x + Y_dot_2 * dir_y
+        
+        # 【修改点】：
+        # 1. 移除 if F < F_safe 的硬截断，即使受力大，向前走依然有分。
+        # 2. 增大系数，确保 Reward > 0 的机会更多。
+        # 3. 限制 v_effective 为正，倒车不给分 (np.maximum)，或者允许倒车但权重低。
+        r_progress = 1.0 * v_effective 
 
-        # R_align_rear: 后车与货物夹角协同 (原有)
+        # ============================================================
+        # 2. Force Penalty (安全约束)
+        # ============================================================
+        # 使用归一化的比率，使得惩罚量级可控
+        # 当 F = F_safe 时，ratio = 1.0
+        force_ratio = F_force_mag / F_safe
+        # 平滑惩罚：受力越小惩罚越接近0，受力接近阈值时惩罚急剧增加
+        # 使用平方项让低受力区域更宽容
+        r_force = -1.0 * np.square(force_ratio)
+
+        # ============================================================
+        # 3. Alignment Penalty (姿态约束)
+        # ============================================================
         delta_psi_rear = self._normalize_angle(Psi_rear - Psi_cargo)
-        r_align_rear = -1.0 * np.square(delta_psi_rear)
+        r_align_rear = -1.0 * np.abs(delta_psi_rear) # 用 abs 比 square 梯度更平缓，特别是初期
 
-        # [新增] R_align_front: 前车与货物夹角协同
-        # 鼓励前车也尽量与货物保持一致，减少“折叠”风险
         delta_psi_front = self._normalize_angle(Psi_front - Psi_cargo)
-        r_align_front = -1.0 * np.square(delta_psi_front)
+        r_align_front = -0.5 * np.abs(delta_psi_front) # 前车权重稍微低一点
 
-
+        # ============================================================
+        # 4. Smoothness & Stability (辅助约束) - 大幅降低权重
+        # ============================================================
         # R_smooth
         if i_sim > 0:
             u_curr = self.model.u_arch[i_sim, 4:8]
@@ -308,47 +349,42 @@ class TwoCarrierEnv(gym.Env):
         else:
             r_smooth = 0.0
 
-        # R_progress: 向量投影 (Vector Projection) [cite: 195]
-        X1_target, Y1_target = self.model.getXYi(x, 0) # 使用前车作为牵引方向参考，或者货物中心
-        # 为了简单，这里还是用货物中心
-        target_x, target_y = x[0], x[1]
-        self_x, self_y = self.model.getXYi(x, 1)
-        
-        vec_x = target_x - self_x
-        vec_y = target_y - self_y
-        dist = np.hypot(vec_x, vec_y)
-        
-        if dist > 1e-3:
-            dir_x, dir_y = vec_x / dist, vec_y / dist
-        else:
-            dir_x, dir_y = 0, 0
-            
-        X_dot_2, Y_dot_2 = self.model.getXYdoti(x, 1)
-        v_effective = X_dot_2 * dir_x + Y_dot_2 * dir_y
-        
-        if F_force_mag < F_safe:
-            r_progress = 0.2 * v_effective 
-        else:
-            r_progress = 0.0
-        
-        # R_stability
         Psi_dot_rear = self.model.x[9]
-        r_stability = -5.0 * np.square(Psi_dot_rear)
+        # 【修改点】：大幅降低系数，原代码 -5.0 太大了，导致 Agent 不敢转向
+        r_stability = -0.5 * np.square(Psi_dot_rear)
 
-        total_reward = (1.0 * r_force) + \
-                       (1.0 * r_align_rear) + \
-                       (1.0 * r_align_front) + \
-                       (2.0 * r_smooth) + \
-                       (1.0 * r_progress) + \
-                       (2.0 * r_stability)
+        # ============================================================
+        # 5. Alive Bonus (生存奖励)
+        # ============================================================
+        # 只要没触发 Force Limit 结束，每一步都给一点点奖励，缓解稀疏性
+        r_alive = 0.05
+
+        # ============================================================
+        # 总分合成 (权重调整)
+        # ============================================================
+        # 目标：让 r_progress 在正常运行时能抵消掉 r_force 等惩罚，使 total > 0
+        
+        # 权重配置
+        w_progress = 2.0   # 提高进度权重
+        w_force = 0.005      # 降低受力惩罚权重 (让它先学会跑，再学会稳)
+        w_align = 0.5      # 降低对齐权重
+        w_smooth = 0.5    # 极低的平滑权重，初期不要限制它的探索
+        w_stability = 1.0  # 低稳定性权重
+        
+        total_reward = (w_progress * r_progress) + \
+                       (w_force * r_force) + \
+                       (w_align * (r_align_rear + r_align_front)) + \
+                       (w_smooth * r_smooth) + \
+                       (w_stability * r_stability) + \
+                       r_alive
         
         self.reward_info = {
-            "r_force": r_force * 1.0,
-            "r_align_rear": r_align_rear * 1.0,
-            "r_align_front": r_align_front * 1.0,
-            "r_smooth": r_smooth * 2.0,
-            "r_progress": r_progress * 1.0,
-            "r_stability": r_stability * 2.0,
+            "r_force": r_force * w_force,
+            "r_align_rear": r_align_rear * w_align,
+            "r_align_front": r_align_front * w_align,
+            "r_smooth": r_smooth * w_smooth,
+            "r_progress": r_progress * w_progress,
+            "r_stability": r_stability * w_stability,
             "val_force": F_force_mag,
             "val_delta_psi_rear": delta_psi_rear,
             "val_delta_psi_front": delta_psi_front
@@ -414,18 +450,18 @@ class TwoCarrierEnv(gym.Env):
             "control_smooth_penalty": self.control_smooth_penalty
         }
         
-        # 物理熔断
-        Fh2_x = self.model.Fh_arch[self.model.count, 2]
-        Fh2_y = self.model.Fh_arch[self.model.count, 3]
-        current_force = np.hypot(Fh2_x, Fh2_y)
-        FORCE_TERMINATE_THRESHOLD = 10000.0 
+        # # 物理熔断
+        # Fh2_x = self.model.Fh_arch[self.model.count, 2]
+        # Fh2_y = self.model.Fh_arch[self.model.count, 3]
+        # current_force = np.hypot(Fh2_x, Fh2_y)
+        # FORCE_TERMINATE_THRESHOLD = 10000.0 
         
-        if current_force > FORCE_TERMINATE_THRESHOLD:
-            terminated = True
-            reward -= 2000.0 
-            info['termination_reason'] = 'force_limit'
-        else:
-            info['termination_reason'] = 'time_limit'
+        # if current_force > FORCE_TERMINATE_THRESHOLD:
+        #     terminated = True
+        #     reward -= 2000.0 
+        #     info['termination_reason'] = 'force_limit'
+        # else:
+        #     info['termination_reason'] = 'time_limit'
 
         return observation, reward, terminated, truncated, info
 
