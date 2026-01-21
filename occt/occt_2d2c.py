@@ -174,8 +174,8 @@ class TwoCarrierEnv(gym.Env):
         start_y = self.config.get('Y_o_0', 0) # 假设初始 Y 为 0
 
         # 2. 定义路径参数
-        total_length = 150.0  # 路径总长 (覆盖 max_episode_steps * speed)
-        num_points = 6        # 控制点数量 (控制点越多，弯道越复杂)
+        total_length = 30.0  # 路径总长 (覆盖 max_episode_steps * speed)
+        num_points = 4        # 控制点数量 (控制点越多，弯道越复杂)
         
         # 3. 生成控制点 (Control Points)
         # X轴：均匀分布
@@ -218,7 +218,7 @@ class TwoCarrierEnv(gym.Env):
         
         # 2. 预瞄 (Lookahead) 机制
         # 不看当前位置，看前方一点点，这样走线更顺滑
-        lookahead_dist = 3.0 
+        lookahead_dist = 2.0 
         target_x = X_front + lookahead_dist
         
         # 3. 计算目标状态
@@ -974,7 +974,7 @@ if __name__ == "__main__":
     
     # 3. 运行仿真循环
     # 我们运行 300 步，足够观察前车过弯
-    steps = 300
+    steps = 1000
     print(f"⏳ 正在运行 {steps} 步仿真...")
     
     for i in range(steps):
