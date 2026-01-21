@@ -25,7 +25,7 @@ class TwoCarrierEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 5}
 
     def __init__(self, render_mode=None, config_path=None, enable_visualization=False, 
-                 vecnorm_frozen: bool = False, vecnorm_mean=None, vecnorm_var=None):
+                 vecnorm_frozen: bool=False, vecnorm_mean=None, vecnorm_var=None, shared_w_force=None):
         super().__init__()
         
         # 加载2d2c.yaml配置文件
@@ -127,6 +127,10 @@ class TwoCarrierEnv(gym.Env):
         
         self.hinge_force_penalty = 0.0
         self.control_smooth_penalty = 0.0
+        # 保存共享变量
+        self.shared_w_force = shared_w_force
+        # 默认初始权重 (如果没传共享变量，就用这个默认值)
+        self.default_w_force = 0.005
 
     def _load_config(self, config_path):
         if config_path is None:
@@ -467,8 +471,14 @@ class TwoCarrierEnv(gym.Env):
         # 目标：让 r_progress 在正常运行时能抵消掉 r_force 等惩罚，使 total > 0
         
         # 权重配置
+        # 动态获取 w_force
+        if self.shared_w_force is not None:
+            # .value 是 multiprocessing.Value 的属性，跨进程实时读取
+            w_force = self.shared_w_force.value 
+        else:
+            w_force = self.default_w_force
         w_progress = 2.0   # 提高进度权重
-        w_force = 0.005      # 降低受力惩罚权重 (让它先学会跑，再学会稳)
+        # w_force = 0.005      # 降低受力惩罚权重 (让它先学会跑，再学会稳)
         w_align = 0.5      # 降低对齐权重
         w_smooth = 0.5    # 极低的平滑权重，初期不要限制它的探索
         w_stability = 1.0  # 低稳定性权重

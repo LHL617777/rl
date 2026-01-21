@@ -35,7 +35,7 @@ from utils_ppo_occt import eval_model, make_env, make_ppo_models
 # =========================================================================
 # 关键修改：定义模块级辅助函数 (必须在 main 之外，否则 Windows 报错)
 # =========================================================================
-def make_train_env_wrapper(env_name, device, fixed_mean, fixed_var):
+def make_train_env_wrapper(env_name, device, fixed_mean, fixed_var, shared_w_force):
     """
     用于在子进程中创建环境的包装函数。
     根据用户需求，并行运行时 VecNorm 是固定的 (frozen=True)。
@@ -43,6 +43,7 @@ def make_train_env_wrapper(env_name, device, fixed_mean, fixed_var):
     return make_env(
         env_name,
         device=device,  # 子进程通常建议用 CPU，由 Collector 统一传到 GPU
+        shared_w_force=shared_w_force,
         vecnorm_frozen=True,  # 用户指定：固定统计量
         vecnorm_mean=fixed_mean,
         vecnorm_var=fixed_var
@@ -103,6 +104,22 @@ def main(cfg: DictConfig):
     # Create models
     actor, critic = make_ppo_models(cfg.env.env_name, device=device)
 
+    # ================= [Curriculum Learning 设置] =================
+    # 定义受力惩罚的“课程表”
+    # 初始权重 (Phase 1): 很小，让它先学会跑
+    W_FORCE_START = 0.005  
+    # [cite_start]最终权重 (Phase 2): 较大，迫使它优化受力
+    W_FORCE_END = 0.05     
+    # 课程开始的帧数 (前20%的时间先不加压)
+    CURRICULUM_START_FRAME = 0 
+    # 课程结束的帧数 (在训练结束前达到最大权重)
+    CURRICULUM_END_FRAME = cfg.collector.total_frames * 0.8 
+
+    # 创建跨进程共享变量 (类型 'd' 代表 double/float)
+    # 这个变量的值可以在主进程修改，所有子进程环境会自动读取到新值
+    shared_w_force = mp.Value('d', W_FORCE_START)
+    # ==============================================================
+
     # 固定统计量定义
     FIXED_MEAN = [3.267685660834517, -0.3385894488464295, 1.9635006395349606, -0.1718040936161826, -0.12279842830682108, 0.007645809435244238, 0.011146266809907063, -0.0359171949460023, 0.02129872767178046, 339.37157534109247, 8.429046335233613, 0.0]
     FIXED_VAR = [10.854110464128235, 1.1635751967064711, 4.684817522924974, 0.9177030245326943, 0.16467684585450817, 0.1034575355366116, 0.027449087149541657, 0.010220331556196624, 0.016829017219362707, 500327.52070539613, 1705366.736736945, 0.0]
@@ -116,7 +133,8 @@ def main(cfg: DictConfig):
         env_name=cfg.env.env_name,
         device="cpu", 
         fixed_mean=FIXED_MEAN,
-        fixed_var=FIXED_VAR
+        fixed_var=FIXED_VAR,
+        shared_w_force=shared_w_force
     )
 
     collector = Collector(
@@ -399,6 +417,23 @@ def main(cfg: DictConfig):
                     metrics_to_log[f"reward_parts/{key}"] = val_mean
         except Exception as e:
             if i == 0: print(f"⚠️ 提取 Reward Details 失败: {e}")
+
+        # --- 核心：计算并更新当前权重 ---
+        # 1. 计算当前进度 (0.0 ~ 1.0)
+        progress = (collected_frames - CURRICULUM_START_FRAME) / (CURRICULUM_END_FRAME - CURRICULUM_START_FRAME)
+        progress = np.clip(progress, 0.0, 1.0) # 限制在 0~1 之间
+
+        # 2. 线性插值计算当前权重
+        current_w_force = W_FORCE_START + (W_FORCE_END - W_FORCE_START) * progress
+        
+        # 3. 更新共享变量 (所有并行环境会立即生效)
+        shared_w_force.value = current_w_force
+
+        # 4. 记录到 TensorBoard
+        if i % 10 == 0:
+            print(f"Frame {collected_frames}: w_force updated to {current_w_force:.5f}")
+        metrics_to_log["train/w_force"] = current_w_force  # 记录到 wandb/tensorboard 方便观察
+        # ------------------------------------
 
         with timeit("training"):
             for j in range(cfg_loss_ppo_epochs):
