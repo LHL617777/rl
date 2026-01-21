@@ -14,6 +14,8 @@ import cv2
 from PIL import Image
 from io import BytesIO
 import torch
+from scipy.interpolate import CubicSpline  #用于生成平滑曲线
+import math
 
 # plt.rcParams["font.sans-serif"]=["SimHei"] #设置字体
 plt.rcParams["axes.unicode_minus"]=False
@@ -159,6 +161,106 @@ class TwoCarrierEnv(gym.Env):
             'framerate': 10, 'range': 20,
             'oversized_cargo_bias': 2, 'oversized_cargo_width': 3
         }
+    
+    def _generate_random_spline_path(self):
+        """
+        [New Feature] 生成随机样条曲线路径供前车跟踪
+        生成的路径保存在 self.spline_func (函数) 和 self.path_x/y (可视化数据)
+        """
+        # 1. 确定起点 (前车初始位置)
+        # 注意：这里假设 Config 中的 X_o_0 是货物中心，我们需要估算前车大致位置
+        # 根据 config: x_front ≈ X_o_0 + x__o_1
+        start_x = self.config.get('X_o_0', 0) + self.config.get('x__o_1', 5)
+        start_y = self.config.get('Y_o_0', 0) # 假设初始 Y 为 0
+
+        # 2. 定义路径参数
+        total_length = 150.0  # 路径总长 (覆盖 max_episode_steps * speed)
+        num_points = 6        # 控制点数量 (控制点越多，弯道越复杂)
+        
+        # 3. 生成控制点 (Control Points)
+        # X轴：均匀分布
+        key_x = np.linspace(start_x, start_x + total_length, num_points)
+        
+        # Y轴：起点固定，后续点随机扰动
+        key_y = [start_y]
+        
+        # 第2个点波动小一点，保证起步平稳
+        key_y.append(start_y + self.rng.uniform(-2, 2))
+        
+        # 后续点产生较大波动 (模拟变道或S弯)
+        for _ in range(num_points - 2):
+            last_y = key_y[-1]
+            # 随机偏移，但限制在视野范围内 (-30, 30)
+            next_y = last_y + self.rng.uniform(-10, 10) 
+            next_y = np.clip(next_y, -25, 25)
+            key_y.append(next_y)
+            
+        key_y = np.array(key_y)
+        
+        # 4. 生成三次样条函数 y = f(x)
+        self.spline_func = CubicSpline(key_x, key_y)
+        
+        # 5. 生成可视化用的离散点
+        self.path_x = np.linspace(start_x, start_x + total_length, 500)
+        self.path_y = self.spline_func(self.path_x)
+
+    def _get_spline_tracking_u1(self):
+        """
+        [New Feature] 前车跟踪控制器
+        计算前车为了跟踪样条曲线所需的控制量 u1
+        """
+        # 1. 获取前车当前状态
+        # 状态索引依赖 model 定义，通常: x[0-2]cargo, x[3]front_psi, x[4]rear_psi
+        # 我们使用 getXYi 获取前车中心坐标
+        x_state = self.model.x
+        X_front, Y_front = self.model.getXYi(x_state, 0) # idx 0 是前车
+        Psi_front = x_state[3] # 前车航向角
+        
+        # 2. 预瞄 (Lookahead) 机制
+        # 不看当前位置，看前方一点点，这样走线更顺滑
+        lookahead_dist = 3.0 
+        target_x = X_front + lookahead_dist
+        
+        # 3. 计算目标状态
+        # 利用样条函数计算目标Y和目标斜率
+        target_y = self.spline_func(target_x)
+        target_dy_dx = self.spline_func(target_x, 1) # 求一阶导数
+        
+        # 目标航向角 (Desired Heading)
+        target_psi = np.arctan(target_dy_dx)
+        
+        # 4. 计算误差
+        # 横向误差 (Lateral Error): 当前Y 与 对应X处的路径Y 的差
+        current_y_ref = self.spline_func(X_front)
+        lat_error = Y_front - current_y_ref
+        
+        # 航向误差 (Heading Error)
+        heading_error = self._normalize_angle(Psi_front - target_psi)
+        
+        # 5. PD 控制律
+        # k_lat: 纠正偏离路线的力度
+        # k_head: 纠正车头朝向的力度
+        k_lat = 0.3   # 如果车摆动太大，减小这个值
+        k_head = 1.5  # 主要靠这个跟踪方向
+        
+        # 计算前轮转角 (Steering Angle)
+        # 注意符号：如果偏左(y大)，lat_error>0，需要负转角(向右)，所以是负号
+        steer_cmd = -k_lat * lat_error - k_head * heading_error
+        
+        # 6. 约束与输出
+        steer_cmd = np.clip(steer_cmd, self.steer_min_bound, self.steer_max_bound)
+        
+        # 组装 u1: [Steer, ?, Thrust, ?]
+        # 保持推力恒定或稍微随机，主要改变转向
+        u1 = np.copy(self.u1_random)
+        u1[0] = steer_cmd # 覆盖转向角
+        
+        # 可选：根据转向角度适当减速 (模拟真实驾驶)
+        if np.abs(steer_cmd) > 0.2:
+             u1[2] *= 0.9 # 推力减小
+             u1[3] *= 0.9
+             
+        return u1.astype(np.float64)
 
     def normalize_action(self, original_action):
         orig_range = self.original_action_high - self.original_action_low
@@ -412,7 +514,8 @@ class TwoCarrierEnv(gym.Env):
     
     def step(self, action):
         original_action = self.denormalize_action(action)
-        u1 = self._get_noisy_u1()
+        # u1 = self._get_noisy_u1()
+        u1 = self._get_spline_tracking_u1()
         u = np.concatenate([u1, original_action])
         
         self.model.step(u)
@@ -469,9 +572,7 @@ class TwoCarrierEnv(gym.Env):
         super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
-        super().reset(seed=seed)
-        if seed is not None:
-            self.rng = np.random.default_rng(seed)
+        
             
         # ================== 【新增】在这里实现每回合随机速度 ==================
         # 这样每次环境重置，速度都是新的（例如第一把 0.3，第二把 0.8）
@@ -485,6 +586,10 @@ class TwoCarrierEnv(gym.Env):
         self.config['X_dot_o_0'] = vx_init
         self.config['Y_dot_o_0'] = vy_init
         # ================================================================
+
+        # ================== 【新增】生成随机路径 ==================
+        self._generate_random_spline_path()
+        # ========================================================
 
         # 重新初始化模型（或者仅重置状态，取决于你的实现偏好）
         # 推荐保留这行，确保模型参数彻底更新
@@ -599,6 +704,10 @@ class TwoCarrierEnv(gym.Env):
             'cargo_traj': self.ax.plot([], [], 'k--', alpha=0.3, linewidth=1)[0],
             'car1_traj': self.ax.plot([], [], '#3498db', linestyle='--', alpha=0.4, linewidth=1)[0],
             'car2_traj': self.ax.plot([], [], '#e74c3c', linestyle='--', alpha=0.4, linewidth=1)[0],
+            # ================== 【新增】参考路径 Handle ==================
+            # 用红色点划线表示前车计划要走的路径
+            'ref_path': self.ax.plot([], [], 'r-.', alpha=0.5, linewidth=1.5, label='Target Path')[0],
+            # ===========================================================
             'hinge1_traj': self.ax.plot([], [], ':', color='blue', alpha=0.2, linewidth=0.8)[0],
             'hinge2_traj': self.ax.plot([], [], ':', color='orange', alpha=0.2, linewidth=0.8)[0]
         }
@@ -695,6 +804,8 @@ class TwoCarrierEnv(gym.Env):
             self.plot_handles['hinge1_traj'].set_data(hinge1_traj[:, 0], hinge1_traj[:, 1])
             hinge2_traj = np.array(self.trajectories['hinge2'])
             self.plot_handles['hinge2_traj'].set_data(hinge2_traj[:, 0], hinge2_traj[:, 1])
+            if hasattr(self, 'path_x') and hasattr(self, 'path_y'):
+                self.plot_handles['ref_path'].set_data(self.path_x, self.path_y)
 
         X_o = self.model.x_arch[i_sim, 0]
         Y_o = self.model.x_arch[i_sim, 1]
@@ -847,20 +958,56 @@ gym.register(
 )
 
 if __name__ == "__main__":
-    env = gym.make("TwoCarrierEnv-v1", render_mode=None)
+    # 1. 初始化环境，开启可视化模式 (enable_visualization=True)
+    # render_mode="rgb_array" 用于后台生成视频，不弹窗
+    env = gym.make("TwoCarrierEnv-v1", render_mode="rgb_array", enable_visualization=True)
     
-    print("\n--- 【速度验证】 ---")
+    print("\n=== 🚀 开始样条曲线跟踪测试 ===")
+    
+    # 2. 重置环境 (Seed固定以便复现)
     obs, info = env.reset(seed=42)
     
-    # 1. 获取物理引擎的真实状态 (Raw Physics State)
-    raw_x_dot = env.unwrapped.model.x[5] # 全局 Vx
-    raw_y_dot = env.unwrapped.model.x[6] # 全局 Vy
-    raw_v_mag = np.hypot(raw_x_dot, raw_y_dot)
+    # 获取原始环境句柄，用于访问内部变量
+    raw_env = env.unwrapped
+    print(f"✅ 随机路径已生成，路径长度: {len(raw_env.path_x)} 点")
+    print(f"✅ 前车初始位置: ({raw_env.model.x[0]:.2f}, {raw_env.model.x[1]:.2f})")
     
-    print(f"【物理引擎真值】 绝对速度: {raw_v_mag:.4f} m/s (应 > 0.2)")
-    print(f"【物理引擎真值】 全局 Vx : {raw_x_dot:.4f} m/s")
+    # 3. 运行仿真循环
+    # 我们运行 300 步，足够观察前车过弯
+    steps = 300
+    print(f"⏳ 正在运行 {steps} 步仿真...")
     
-    # 2. 对比观测值 (Normalized Observation)
-    print(f"【归一化观测值】 车身 Vx : {obs[2]:.4f} (接近0是正常的，因为均值也是{raw_v_mag:.2f})")
+    for i in range(steps):
+        # 后车（Agent）给一个静止或简单的动作，我们主要观察前车（环境控制）
+        # 动作全是 0 (归一化后)，意味着后车处于中间状态
+        action = np.zeros(4) 
+        
+        obs, reward, terminated, truncated, info = env.step(action)
+        
+        if i % 50 == 0:
+            # 打印前车与路径的偏差 (Lat Error)
+            # 我们需要手动计算一下当前的偏差来打印日志
+            x_front, y_front = raw_env.model.getXYi(raw_env.model.x, 0)
+            target_y = raw_env.spline_func(x_front)
+            error = y_front - target_y
+            print(f"Step {i:03d} | 前车X: {x_front:.2f} | 目标Y: {target_y:.2f} | 实际Y: {y_front:.2f} | 偏差: {error:.4f}")
+
+        if terminated or truncated:
+            print("⚠️ 环境提前终止 (可能是触发了物理熔断)")
+            break
+            
+    # 4. 保存视频
+    # 视频将保存在当前目录下的 output_test 文件夹中
+    print("\n💾 正在保存测试视频...")
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    save_dir = os.path.join(current_dir, "output_test")
     
+    video_path = raw_env.save_eval_video(eval_round="spline_verify", video_save_dir=save_dir)
+    
+    if video_path:
+        print(f"🎉 视频保存成功！请打开查看效果: {video_path}")
+        print("👀 观察重点：视频中应该有一条红色的虚线（目标路径），前车（蓝色）应该沿着这条线行驶。")
+    else:
+        print("❌ 视频保存失败，请检查环境配置。")
+        
     env.close()
