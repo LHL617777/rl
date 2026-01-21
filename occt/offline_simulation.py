@@ -246,11 +246,11 @@ def run_offline_simulation(actor, cfg, vecnorm_state, args):
                 # e. 累计数据
                 ep_reward += reward
                 ep_length += 1
-                ep_hinge_forces.append(info['Fh2'])  # 记录铰接力
+                ep_hinge_forces.append(info['val_force'])  # 记录铰接力
                 
                 # f. 打印进度（每100步）
                 if ep_length % 100 == 0:
-                    fh2_mag = np.hypot(info['Fh2'][0], info['Fh2'][1])  # 铰接力大小
+                    fh2_mag =  info['val_force'] # 铰接力大小
                     pos_error = info.get('pos_error', 0.0)
                     print(f"  Step {ep_length} | 当前奖励: {ep_reward:.2f} | 铰接力大小: {fh2_mag:.2f} | 位置误差: {pos_error:.2f}")
             
@@ -261,7 +261,7 @@ def run_offline_simulation(actor, cfg, vecnorm_state, args):
             
             # 计算本轮铰接力统计
             ep_hinge_array = np.array(ep_hinge_forces)
-            ep_hinge_mag = np.hypot(ep_hinge_array[:, 0], ep_hinge_array[:, 1])
+            ep_hinge_mag = ep_hinge_array
             avg_hinge_force = np.mean(ep_hinge_mag)
             max_hinge_force = np.max(ep_hinge_mag)
             
