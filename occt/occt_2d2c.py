@@ -379,129 +379,104 @@ class TwoCarrierEnv(gym.Env):
     
     def _calculate_reward(self):
         """
-        Optimized Reward: Balance Progress vs. Constraints
-        核心思路：
-        1. 正向激励 (Progress) 必须是主导项。
-        2. 移除硬截断 (Hard Cut-off)，改为软约束。
-        3. 大幅降低辅助惩罚项 (Smooth, Stability) 的权重，避免 Agent 因噎废食。
+        最终修正版 Reward：双重门控机制 (Double Gating)
+        解决：后车自己摆正了，却把前车推折叠了的问题。
         """
+        x = self.model.x
         i_sim = self.model.count
+        
+        # --- 1. 获取状态 ---
         Fh2_x = self.model.Fh_arch[i_sim, 2]
         Fh2_y = self.model.Fh_arch[i_sim, 3]
         F_force_mag = np.hypot(Fh2_x, Fh2_y)
-        
-        x = self.model.x
+        F_safe = self.config.get('force_safe', 2000.0) 
+
         Psi_cargo = x[2]      # 货物航向
         Psi_front = x[3]      # 前车航向
         Psi_rear = x[4]       # 后车航向
         
-        F_safe = self.config.get('force_safe', 2000.0) 
-
-        # ============================================================
-        # 1. Progress Reward (正向主驱动力) - 核心修改
-        # ============================================================
-        X_dot_2, Y_dot_2 = self.model.getXYdoti(x, 1)
-        
-        # 计算目标方向向量
-        target_x, target_y = x[0], x[1] # 货物中心
-        self_x, self_y = self.model.getXYi(x, 1) # 后车中心
-        vec_x = target_x - self_x
-        vec_y = target_y - self_y
-        dist = np.hypot(vec_x, vec_y)
-        
-        if dist > 1e-3:
-            dir_x, dir_y = vec_x / dist, vec_y / dist
-        else:
-            dir_x, dir_y = 0, 0
-            
-        # 有效速度投影
-        v_effective = X_dot_2 * dir_x + Y_dot_2 * dir_y
-        
-        # 【修改点】：
-        # 1. 移除 if F < F_safe 的硬截断，即使受力大，向前走依然有分。
-        # 2. 增大系数，确保 Reward > 0 的机会更多。
-        # 3. 限制 v_effective 为正，倒车不给分 (np.maximum)，或者允许倒车但权重低。
-        r_progress = 1.0 * v_effective 
-
-        # ============================================================
-        # 2. Force Penalty (安全约束)
-        # ============================================================
-        # 使用归一化的比率，使得惩罚量级可控
-        # 当 F = F_safe 时，ratio = 1.0
-        force_ratio = F_force_mag / F_safe
-        # 平滑惩罚：受力越小惩罚越接近0，受力接近阈值时惩罚急剧增加
-        # 使用平方项让低受力区域更宽容
-        r_force = -1.0 * np.square(force_ratio)
-
-        # ============================================================
-        # 3. Alignment Penalty (姿态约束)
-        # ============================================================
+        # --- 2. 计算两个关键夹角 ---
+        # (1) 后车与货物（Agent 自己的姿态）
         delta_psi_rear = self._normalize_angle(Psi_rear - Psi_cargo)
-        r_align_rear = -1.0 * np.abs(delta_psi_rear) # 用 abs 比 square 梯度更平缓，特别是初期
-
+        
+        # (2) 前车与货物（系统的健康状况 - 你指出的那个大角）
         delta_psi_front = self._normalize_angle(Psi_front - Psi_cargo)
-        r_align_front = -0.5 * np.abs(delta_psi_front) # 前车权重稍微低一点
 
-        # ============================================================
-        # 4. Smoothness & Stability (辅助约束) - 大幅降低权重
-        # ============================================================
-        # R_smooth
-        if i_sim > 0:
-            u_curr = self.model.u_arch[i_sim, 4:8]
-            u_prev = self.model.u_arch[i_sim - 1, 4:8]
-            steer_diff = np.sum(np.abs(u_curr[:2] - u_prev[:2]))
-            thrust_diff = np.sum(np.abs(u_curr[2:] - u_prev[2:])) / 1000.0
-            r_smooth = -0.1 * (5.0 * steer_diff + 0.5 * thrust_diff)
-        else:
-            r_smooth = 0.0
-
-        Psi_dot_rear = self.model.x[9]
-        # 【修改点】：大幅降低系数，原代码 -5.0 太大了，导致 Agent 不敢转向
-        r_stability = -0.5 * np.square(Psi_dot_rear)
-
-        # ============================================================
-        # 5. Alive Bonus (生存奖励)
-        # ============================================================
-        # 只要没触发 Force Limit 结束，每一步都给一点点奖励，缓解稀疏性
-        r_alive = 0.05
-
-        # ============================================================
-        # 总分合成 (权重调整)
-        # ============================================================
-        # 目标：让 r_progress 在正常运行时能抵消掉 r_force 等惩罚，使 total > 0
+        # --- 3. Progress Reward (盲从协同) ---
+        # 计算投影速度（同上）
+        X_cargo, Y_cargo = x[0], x[1]
+        X_front, Y_front = self.model.getXYi(x, 0)
+        vec_fc_x = X_front - X_cargo
+        vec_fc_y = Y_front - Y_cargo
+        dist_fc = np.hypot(vec_fc_x, vec_fc_y) + 1e-6
+        dir_x = vec_fc_x / dist_fc
+        dir_y = vec_fc_y / dist_fc
         
-        # 权重配置
-        # 动态获取 w_force
+        X_dot_cargo = x[self.config['N_q'] + 0]
+        Y_dot_cargo = x[self.config['N_q'] + 1]
+        v_effective = X_dot_cargo * dir_x + Y_dot_cargo * dir_y
+        
+        target_speed = 1.0
+        r_progress = np.clip(v_effective, -0.5, target_speed)
+
+        # =================================================================
+        # 【核心修改】双重门控机制 (Double Gating)
+        # =================================================================
+        # 阈值设定：45度 (约0.8弧度)
+        is_rear_folded = np.abs(delta_psi_rear) > 0.8
+        is_front_folded = np.abs(delta_psi_front) > 0.8  # <--- 加入了你的观察
+        
+        if is_rear_folded or is_front_folded:
+            # 只要任意一端折叠，不仅没收进度分，还要倒扣分！
+            # 迫使 Agent 在看到前车折叠时，必须减速或停车
+            r_progress = -2.0 
+        
+        # --- 4. Alignment Penalty (同时惩罚两端) ---
+        # 后车不正，扣分（为了传力效率）
+        r_align_rear = -1.0 * np.abs(delta_psi_rear)
+        
+        # 前车不正，也要扣后车的分（为了系统安全）
+        # 告诉 Agent：前车歪了也是你的责任（因为是你推的）
+        r_align_front = -1.0 * np.abs(delta_psi_front)
+
+        # --- 5. Force Penalty (指数级) ---
+        force_ratio = F_force_mag / F_safe
+        r_force = -1.0 * (force_ratio ** 2)
+        if force_ratio > 0.8:
+            r_force -= 10.0 * (force_ratio - 0.8)
+
+        # --- 6. Stability ---
+        Psi_dot_rear = x[self.config['N_q'] + 4]
+        r_stability = -1.0 * np.square(Psi_dot_rear)
+
+        # --- 7. 权重配置 ---
+        w_progress = 10.0
         if self.shared_w_force is not None:
-            # .value 是 multiprocessing.Value 的属性，跨进程实时读取
-            w_force = self.shared_w_force.value 
+             w_force = self.shared_w_force.value
         else:
-            w_force = self.default_w_force
-        w_progress = 2.0   # 提高进度权重
-        # w_force = 0.005      # 降低受力惩罚权重 (让它先学会跑，再学会稳)
-        w_align = 0.5      # 降低对齐权重
-        w_smooth = 0.5    # 极低的平滑权重，初期不要限制它的探索
-        w_stability = 1.0  # 低稳定性权重
+             w_force = 50.0
         
+        w_align = 20.0
+        w_stability = 2.0
+        
+        # 总分包含 front 和 rear 的惩罚
         total_reward = (w_progress * r_progress) + \
                        (w_force * r_force) + \
                        (w_align * (r_align_rear + r_align_front)) + \
-                       (w_smooth * r_smooth) + \
                        (w_stability * r_stability) + \
-                       r_alive
-        
+                       0.05
+
         self.reward_info = {
             "r_force": r_force * w_force,
             "r_align_rear": r_align_rear * w_align,
             "r_align_front": r_align_front * w_align,
-            "r_smooth": r_smooth * w_smooth,
             "r_progress": r_progress * w_progress,
             "r_stability": r_stability * w_stability,
             "val_force": F_force_mag,
             "val_delta_psi_rear": delta_psi_rear,
             "val_delta_psi_front": delta_psi_front
         }
-
+        
         return total_reward
 
     def _normalize_angle(self, angle):
@@ -546,7 +521,7 @@ class TwoCarrierEnv(gym.Env):
             "reward_r_force": np.array(self.reward_info.get("r_force", 0.0), dtype=np.float32),
             "reward_r_align_rear": np.array(self.reward_info.get("r_align_rear", 0.0), dtype=np.float32),
             "reward_r_align_front": np.array(self.reward_info.get("r_align_front", 0.0), dtype=np.float32),
-            "reward_r_smooth": np.array(self.reward_info.get("r_smooth", 0.0), dtype=np.float32),
+            # "reward_r_smooth": np.array(self.reward_info.get("r_smooth", 0.0), dtype=np.float32),
             "reward_r_progress": np.array(self.reward_info.get("r_progress", 0.0), dtype=np.float32),
             "reward_r_stability": np.array(self.reward_info.get("r_stability", 0.0), dtype=np.float32),
             "reward_val_force": np.array(self.reward_info.get("val_force", 0.0), dtype=np.float32),

@@ -107,9 +107,9 @@ def main(cfg: DictConfig):
     # ================= [Curriculum Learning 设置] =================
     # 定义受力惩罚的“课程表”
     # 初始权重 (Phase 1): 很小，让它先学会跑
-    W_FORCE_START = 0.005  
+    W_FORCE_START = 10  
     # [cite_start]最终权重 (Phase 2): 较大，迫使它优化受力
-    W_FORCE_END = 0.05     
+    W_FORCE_END = 50    
     # 课程开始的帧数 (前20%的时间先不加压)
     CURRICULUM_START_FRAME = 0 
     # 课程结束的帧数 (在训练结束前达到最大权重)
@@ -117,7 +117,9 @@ def main(cfg: DictConfig):
 
     # 创建跨进程共享变量 (类型 'd' 代表 double/float)
     # 这个变量的值可以在主进程修改，所有子进程环境会自动读取到新值
-    shared_w_force = mp.Value('d', W_FORCE_START)
+    # shared_w_force = mp.Value('d', W_FORCE_START)
+    manager = mp.Manager()
+    shared_w_force = manager.Value('d', W_FORCE_START)
     # ==============================================================
 
     # 固定统计量定义
@@ -403,7 +405,8 @@ def main(cfg: DictConfig):
         # 提取并统计 Reward 分项
         try:
             reward_keys = [
-                "reward_r_force", "reward_r_align_rear", "reward_r_align_front", "reward_r_smooth", 
+                "reward_r_force", "reward_r_align_rear", "reward_r_align_front",
+                # "reward_r_smooth", 
                 "reward_r_progress", "reward_r_stability",
                 "reward_val_force", "reward_val_delta_psi_rear", "reward_val_delta_psi_front"
             ]

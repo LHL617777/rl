@@ -76,7 +76,7 @@ def make_env(
         "reward_r_force", 
         "reward_r_align_rear", 
         "reward_r_align_front", 
-        "reward_r_smooth", 
+        # "reward_r_smooth", 
         "reward_r_progress", 
         "reward_r_stability",
         "reward_val_force",
