@@ -443,7 +443,7 @@ class TwoCarrierEnv(gym.Env):
         force_ratio = F_force_mag / F_safe
         r_force = -1.0 * (force_ratio ** 2)
         if force_ratio > 0.8:
-            r_force -= 10.0 * (force_ratio - 0.8)
+            r_force -= 2.0 * (force_ratio - 0.8)
 
         # --- 6. Stability ---
         Psi_dot_rear = x[self.config['N_q'] + 4]
@@ -550,6 +550,24 @@ class TwoCarrierEnv(gym.Env):
         #     info['termination_reason'] = 'force_limit'
         # else:
         #     info['termination_reason'] = 'time_limit'
+
+        # 【新增】折叠终止条件
+        # 0.8 弧度 ≈ 45度，1.0 弧度 ≈ 57度。
+        # 建议设宽一点点，给它救车的机会，但不能太宽。
+        TERMINATE_ANGLE = 1.2  # 约 68度
+        
+        x = self.model.x
+        Psi_cargo = x[2]
+        Psi_front = x[3]
+        Psi_rear = x[4]
+        
+        d_rear = np.abs(self._normalize_angle(Psi_rear - Psi_cargo))
+        d_front = np.abs(self._normalize_angle(Psi_front - Psi_cargo))
+        
+        if d_rear > TERMINATE_ANGLE or d_front > TERMINATE_ANGLE:
+            terminated = True
+            reward -= 500.0  # 给一个固定的死亡惩罚，代替那是几千分的持续惩罚
+            info['termination_reason'] = 'jackknife'
 
         return observation, reward, terminated, truncated, info
 
