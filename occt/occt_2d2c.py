@@ -422,9 +422,9 @@ class TwoCarrierEnv(gym.Env):
         # =================================================================
         # 【核心修改】双重门控机制 (Double Gating)
         # =================================================================
-        # 阈值设定：45度 (约0.8弧度)
-        is_rear_folded = np.abs(delta_psi_rear) > 0.8
-        is_front_folded = np.abs(delta_psi_front) > 0.8  # <--- 加入了你的观察
+        # 阈值设定：22.5度 (约0.4弧度)
+        is_rear_folded = np.abs(delta_psi_rear) > 0.4
+        is_front_folded = np.abs(delta_psi_front) > 0.4
         
         if is_rear_folded or is_front_folded:
             # 只要任意一端折叠，不仅没收进度分，还要倒扣分！
@@ -433,11 +433,11 @@ class TwoCarrierEnv(gym.Env):
         
         # --- 4. Alignment Penalty (同时惩罚两端) ---
         # 后车不正，扣分（为了传力效率）
-        r_align_rear = -1.0 * np.abs(delta_psi_rear)
+        r_align_rear = -1.0 * (delta_psi_rear ** 2)
         
         # 前车不正，也要扣后车的分（为了系统安全）
         # 告诉 Agent：前车歪了也是你的责任（因为是你推的）
-        r_align_front = -1.0 * np.abs(delta_psi_front)
+        r_align_front = -1.0 * (delta_psi_front ** 2)
 
         # --- 5. Force Penalty (指数级) ---
         force_ratio = F_force_mag / F_safe
@@ -449,17 +449,28 @@ class TwoCarrierEnv(gym.Env):
         Psi_dot_rear = x[self.config['N_q'] + 4]
         r_stability = -1.0 * np.square(Psi_dot_rear)
 
-        # --- 7. 权重配置 ---
-        w_progress = 10.0
+        
+        # --- 7. R_smooth ---
+        if i_sim > 0:
+            u_curr = self.model.u_arch[i_sim, 4:8]
+            u_prev = self.model.u_arch[i_sim - 1, 4:8]
+            steer_diff = np.sum(np.abs(u_curr[:2] - u_prev[:2]))
+            thrust_diff = np.sum(np.abs(u_curr[2:] - u_prev[2:])) / 1000.0
+            r_smooth = -0.1 * (5.0 * steer_diff + 0.5 * thrust_diff)
+        else:
+            r_smooth = 0.0
+
+        # --- 8. 权重配置 ---
+        w_progress = 1.0
         if self.shared_w_force is not None:
              w_force = self.shared_w_force.value
         else:
              w_force = 50.0
         
-        w_align = 20.0
-        w_stability = 2.0
+        w_align = 2.0
+        w_stability = 0.3
         
-        # 总分包含 front 和 rear 的惩罚
+        # 总分包含：进度分、力分、对齐分（后车+前车）、稳定性分
         total_reward = (w_progress * r_progress) + \
                        (w_force * r_force) + \
                        (w_align * (r_align_rear + r_align_front)) + \
