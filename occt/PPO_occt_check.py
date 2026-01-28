@@ -204,6 +204,127 @@ def main(cfg: DictConfig):
     optim = group_optimizers(actor_optim, critic_optim)
     del actor_optim, critic_optim
 
+    def save_checkpoint(current_frames):
+        # """封装Checkpoint保存逻辑，适配cfg配置，新增VecNorm统计量保存"""
+        # # 关键：提取训练环境的原始TwoCarrierEnv实例，获取VecNorm统计量
+        # raw_train_env = None
+        # vecnorm_mean = np.zeros(12, dtype=np.float64)
+        # vecnorm_var = np.ones(12, dtype=np.float64) * 1e-4  # 与环境默认最小方差一致
+        # vecnorm_frozen = False
+
+        # try:
+        #     # 解包torchrl Collector的环境实例，获取原始TwoCarrierEnv
+        #     train_env_instance = collector.env
+        #     raw_train_env = train_env_instance.unwrapped
+        #     while not isinstance(raw_train_env, TwoCarrierEnv) and raw_train_env is not None:
+        #         raw_train_env = getattr(raw_train_env, "_env", raw_train_env.unwrapped)
+            
+        #     if raw_train_env is not None:
+        #         # 提取VecNorm统计量
+        #         vecnorm_mean = raw_train_env.vecnorm_mean.copy()
+        #         vecnorm_var = raw_train_env.vecnorm_var.copy()
+        #         vecnorm_frozen = raw_train_env.vecnorm_frozen
+        # except Exception as e:
+        #     print(f"⚠️ 获取训练环境VecNorm统计量失败（不影响模型保存）：{e}")
+
+        # # 构造Checkpoint字典，新增VecNorm相关内容
+        # ckpt_dict = {
+        #     "actor_state_dict": actor.state_dict(),
+        #     "critic_state_dict": critic.state_dict(),
+        #     "optim_state_dict": optim.state_dict(),
+        #     "cfg": cfg,
+        #     "collected_frames": current_frames,
+        #     # 新增：VecNorm统计量，用于后续加载时恢复归一化分布
+        #     "vecnorm_mean": vecnorm_mean,
+        #     "vecnorm_var": vecnorm_var,
+        #     "vecnorm_frozen": vecnorm_frozen,
+        # }
+        # save_dir = cfg.checkpoint.checkpoint_dir
+        # os.makedirs(save_dir, exist_ok=True)
+        # save_path = os.path.join(save_dir, f"checkpoint_{current_frames}_frames.pt")
+        # torch.save(ckpt_dict, save_path)
+        # print(f"\n✅ Checkpoint saved to: {save_path}")
+
+        """仅保存模型和配置，VecNorm使用代码中固定的值"""
+        ckpt_dict = {
+            "actor_state_dict": actor.state_dict(),
+            "critic_state_dict": critic.state_dict(),
+            "optim_state_dict": optim.state_dict(),
+            "cfg": cfg,
+            "collected_frames": current_frames,
+            # 直接保存固定的统计量，或者保存 None，取决于后续加载需求
+            # "vecnorm_mean": np.array(FIXED_MEAN),
+            # "vecnorm_var": np.array(FIXED_VAR),
+            "vecnorm_frozen": True,
+        }
+        save_dir = cfg.checkpoint.checkpoint_dir
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"checkpoint_{current_frames}_frames.pt")
+        torch.save(ckpt_dict, save_path)
+        print(f"\n✅ Checkpoint saved to: {save_path}")
+
+    # load_checkpoint 函数 (保持不变，无需修改)
+    def load_checkpoint(ckpt_path, target_env=None):
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint文件不存在：{ckpt_path}")
+        ckpt_dict = torch.load(ckpt_path, map_location=device, weights_only=False)
+        actor.load_state_dict(ckpt_dict["actor_state_dict"])
+        critic.load_state_dict(ckpt_dict["critic_state_dict"])
+        optim.load_state_dict(ckpt_dict["optim_state_dict"])
+        # if target_env is not None:
+        #     try:
+        #         raw_env = target_env.unwrapped
+        #         while not isinstance(raw_env, TwoCarrierEnv) and raw_env is not None:
+        #             raw_env = getattr(raw_env, "_env", raw_env.unwrapped)
+        #         if raw_env is not None:
+        #             raw_env.vecnorm_mean = np.asarray(ckpt_dict["vecnorm_mean"], dtype=np.float64)
+        #             raw_env.vecnorm_var = np.asarray(ckpt_dict["vecnorm_var"], dtype=np.float64)
+        #             raw_env.vecnorm_frozen = ckpt_dict["vecnorm_frozen"]
+        #     except Exception as e:
+        #         print(f"⚠️ 恢复VecNorm统计量失败：{e}")
+        return ckpt_dict["cfg"], ckpt_dict["collected_frames"]
+    
+    # ================= [新增] 断点重训/预训练加载逻辑 =================
+    # 假设你在 config_occt.yaml 中添加了字段: checkpoint.load_path (默认为 null)
+    # 或者直接在这里硬编码测试
+    load_path = cfg.checkpoint.get("load_path", None)  
+    # 示例： load_path = "checkpoints/checkpoint_1000000_frames.pt" 
+    
+    if load_path and os.path.exists(load_path):
+        print(f"\n🔄 正在加载预训练模型: {load_path}")
+        try:
+            # 复用你已有的 load_checkpoint 函数，但我们需要微调一下调用方式
+            # 注意：这里我们还没创建 Collector，所以暂时传 None 给 target_env
+            # 如果 VecNorm 是固定的 (FIXED_MEAN)，则不需要从 checkpoint 恢复 env 统计量
+            loaded_cfg, loaded_frames = load_checkpoint(load_path, target_env=None)
+            
+            print(f"✅ 模型权重已恢复 (原训练步数: {loaded_frames})")
+            
+            # 【策略选择】
+            # 选项 A: 彻底的 "Resume" (恢复优化器状态，继续之前的训练流)
+            # 适用于：机器断电了，想接着跑
+            # -------------------------------------------------------------
+            # collected_frames = loaded_frames 
+            # print("   -> 模式: Resume (继承历史步数和优化器状态)")
+
+            # 选项 B: "Finetune" / 课程学习 (重置优化器，重置步数，只保留网络权重)
+            # 适用于：你的场景（第一阶段结束，改变超参如 max_steps，进入第二阶段）
+            # -------------------------------------------------------------
+            # 如果是课程学习，我们通常希望学习率重新开始衰减，或者使用较小的恒定学习率
+            # 所以我们只加载网络权重，不加载 optim_state_dict (除非你想保持动量)
+            # 这里我做一个折中：加载所有状态，但允许你手动重置 collected_frames
+            
+            # 如果你想让进度条从 0 开始 (适合课程学习的第二阶段):
+            collected_frames = 0 
+            print("   -> 模式: Curriculum Finetune (步数重置为0，在新配置下继续训练)")
+            
+        except Exception as e:
+            print(f"❌ 加载 Checkpoint 失败: {e}")
+            raise e
+    else:
+        print("\n🆕 未指定 load_path 或文件不存在，开始从头训练")
+    # ====================================================================
+
     # Create logger
     logger = None
     if cfg.logger.backend:
@@ -289,86 +410,6 @@ def main(cfg: DictConfig):
     cfg_logger_num_test_episodes = cfg.logger.num_test_episodes
     losses = TensorDict(batch_size=[cfg_loss_ppo_epochs, num_mini_batches])
 
-    # ===================== 修改点2：简化 Checkpoint (无需提取环境统计量) =====================
-    def save_checkpoint(current_frames):
-        # """封装Checkpoint保存逻辑，适配cfg配置，新增VecNorm统计量保存"""
-        # # 关键：提取训练环境的原始TwoCarrierEnv实例，获取VecNorm统计量
-        # raw_train_env = None
-        # vecnorm_mean = np.zeros(12, dtype=np.float64)
-        # vecnorm_var = np.ones(12, dtype=np.float64) * 1e-4  # 与环境默认最小方差一致
-        # vecnorm_frozen = False
-
-        # try:
-        #     # 解包torchrl Collector的环境实例，获取原始TwoCarrierEnv
-        #     train_env_instance = collector.env
-        #     raw_train_env = train_env_instance.unwrapped
-        #     while not isinstance(raw_train_env, TwoCarrierEnv) and raw_train_env is not None:
-        #         raw_train_env = getattr(raw_train_env, "_env", raw_train_env.unwrapped)
-            
-        #     if raw_train_env is not None:
-        #         # 提取VecNorm统计量
-        #         vecnorm_mean = raw_train_env.vecnorm_mean.copy()
-        #         vecnorm_var = raw_train_env.vecnorm_var.copy()
-        #         vecnorm_frozen = raw_train_env.vecnorm_frozen
-        # except Exception as e:
-        #     print(f"⚠️ 获取训练环境VecNorm统计量失败（不影响模型保存）：{e}")
-
-        # # 构造Checkpoint字典，新增VecNorm相关内容
-        # ckpt_dict = {
-        #     "actor_state_dict": actor.state_dict(),
-        #     "critic_state_dict": critic.state_dict(),
-        #     "optim_state_dict": optim.state_dict(),
-        #     "cfg": cfg,
-        #     "collected_frames": current_frames,
-        #     # 新增：VecNorm统计量，用于后续加载时恢复归一化分布
-        #     "vecnorm_mean": vecnorm_mean,
-        #     "vecnorm_var": vecnorm_var,
-        #     "vecnorm_frozen": vecnorm_frozen,
-        # }
-        # save_dir = cfg.checkpoint.checkpoint_dir
-        # os.makedirs(save_dir, exist_ok=True)
-        # save_path = os.path.join(save_dir, f"checkpoint_{current_frames}_frames.pt")
-        # torch.save(ckpt_dict, save_path)
-        # print(f"\n✅ Checkpoint saved to: {save_path}")
-
-        """仅保存模型和配置，VecNorm使用代码中固定的值"""
-        ckpt_dict = {
-            "actor_state_dict": actor.state_dict(),
-            "critic_state_dict": critic.state_dict(),
-            "optim_state_dict": optim.state_dict(),
-            "cfg": cfg,
-            "collected_frames": current_frames,
-            # 直接保存固定的统计量，或者保存 None，取决于后续加载需求
-            # "vecnorm_mean": np.array(FIXED_MEAN),
-            # "vecnorm_var": np.array(FIXED_VAR),
-            "vecnorm_frozen": True,
-        }
-        save_dir = cfg.checkpoint.checkpoint_dir
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, f"checkpoint_{current_frames}_frames.pt")
-        torch.save(ckpt_dict, save_path)
-        print(f"\n✅ Checkpoint saved to: {save_path}")
-
-    # load_checkpoint 函数 (保持不变，无需修改)
-    def load_checkpoint(ckpt_path, target_env=None):
-        if not os.path.exists(ckpt_path):
-            raise FileNotFoundError(f"Checkpoint文件不存在：{ckpt_path}")
-        ckpt_dict = torch.load(ckpt_path, map_location=device)
-        actor.load_state_dict(ckpt_dict["actor_state_dict"])
-        critic.load_state_dict(ckpt_dict["critic_state_dict"])
-        optim.load_state_dict(ckpt_dict["optim_state_dict"])
-        # if target_env is not None:
-        #     try:
-        #         raw_env = target_env.unwrapped
-        #         while not isinstance(raw_env, TwoCarrierEnv) and raw_env is not None:
-        #             raw_env = getattr(raw_env, "_env", raw_env.unwrapped)
-        #         if raw_env is not None:
-        #             raw_env.vecnorm_mean = np.asarray(ckpt_dict["vecnorm_mean"], dtype=np.float64)
-        #             raw_env.vecnorm_var = np.asarray(ckpt_dict["vecnorm_var"], dtype=np.float64)
-        #             raw_env.vecnorm_frozen = ckpt_dict["vecnorm_frozen"]
-        #     except Exception as e:
-        #         print(f"⚠️ 恢复VecNorm统计量失败：{e}")
-        return ckpt_dict["cfg"], ckpt_dict["collected_frames"]
 
     save_interval = cfg.checkpoint.save_interval
     last_saved_frames = 0

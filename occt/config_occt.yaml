@@ -49,3 +49,4 @@ checkpoint:
   save_interval: 20480
   keep_interval: 512_00
   checkpoint_dir: ./checkpoints_occt/
+  load_path: null
