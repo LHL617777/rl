@@ -35,7 +35,7 @@ from utils_ppo_occt import eval_model, make_env, make_ppo_models
 # =========================================================================
 # 关键修改：定义模块级辅助函数 (必须在 main 之外，否则 Windows 报错)
 # =========================================================================
-def make_train_env_wrapper(env_name, device, fixed_mean, fixed_var, shared_w_force):
+def make_train_env_wrapper(env_name, device, shared_w_force):
     """
     用于在子进程中创建环境的包装函数。
     根据用户需求，并行运行时 VecNorm 是固定的 (frozen=True)。
@@ -45,8 +45,8 @@ def make_train_env_wrapper(env_name, device, fixed_mean, fixed_var, shared_w_for
         device=device,  # 子进程通常建议用 CPU，由 Collector 统一传到 GPU
         shared_w_force=shared_w_force,
         vecnorm_frozen=True,  # 用户指定：固定统计量
-        vecnorm_mean=fixed_mean,
-        vecnorm_var=fixed_var
+        # vecnorm_mean=fixed_mean,
+        # vecnorm_var=fixed_var
         # vecnorm_frozen=False,  # <--- 关键：解冻，开始统计
         # vecnorm_mean=None,     # <--- 关键：清空旧均值
         # vecnorm_var=None       # <--- 关键：清空旧方差
@@ -122,9 +122,9 @@ def main(cfg: DictConfig):
     shared_w_force = manager.Value('d', W_FORCE_START)
     # ==============================================================
 
-    # 固定统计量定义
-    FIXED_MEAN = [3.267685660834517, -0.3385894488464295, 1.9635006395349606, -0.1718040936161826, -0.12279842830682108, 0.007645809435244238, 0.011146266809907063, -0.0359171949460023, 0.02129872767178046, 339.37157534109247, 8.429046335233613, 0.0]
-    FIXED_VAR = [10.854110464128235, 1.1635751967064711, 4.684817522924974, 0.9177030245326943, 0.16467684585450817, 0.1034575355366116, 0.027449087149541657, 0.010220331556196624, 0.016829017219362707, 500327.52070539613, 1705366.736736945, 0.0]
+    # # 固定统计量定义
+    # FIXED_MEAN = [3.267685660834517, -0.3385894488464295, 1.9635006395349606, -0.1718040936161826, -0.12279842830682108, 0.007645809435244238, 0.011146266809907063, -0.0359171949460023, 0.02129872767178046, 339.37157534109247, 8.429046335233613, 0.0]
+    # FIXED_VAR = [10.854110464128235, 1.1635751967064711, 4.684817522924974, 0.9177030245326943, 0.16467684585450817, 0.1034575355366116, 0.027449087149541657, 0.010220331556196624, 0.016829017219362707, 500327.52070539613, 1705366.736736945, 0.0]
     # FIXED_MEAN = None
     # FIXED_VAR = None
     # ================= 修改点1：使用 functools.partial + ParallelEnv 创建 Collector =================
@@ -134,8 +134,8 @@ def main(cfg: DictConfig):
         make_train_env_wrapper,
         env_name=cfg.env.env_name,
         device="cpu", 
-        fixed_mean=FIXED_MEAN,
-        fixed_var=FIXED_VAR,
+        # fixed_mean=FIXED_MEAN,
+        # fixed_var=FIXED_VAR,
         shared_w_force=shared_w_force
     )
 
@@ -231,8 +231,8 @@ def main(cfg: DictConfig):
         render_mode=None,
         enable_visualization=False,
         vecnorm_frozen=True,
-        vecnorm_mean=FIXED_MEAN,
-        vecnorm_var=FIXED_VAR
+        # vecnorm_mean=FIXED_MEAN,
+        # vecnorm_var=FIXED_VAR
     )
     test_env.eval()
 
@@ -339,8 +339,8 @@ def main(cfg: DictConfig):
             "cfg": cfg,
             "collected_frames": current_frames,
             # 直接保存固定的统计量，或者保存 None，取决于后续加载需求
-            "vecnorm_mean": np.array(FIXED_MEAN),
-            "vecnorm_var": np.array(FIXED_VAR),
+            # "vecnorm_mean": np.array(FIXED_MEAN),
+            # "vecnorm_var": np.array(FIXED_VAR),
             "vecnorm_frozen": True,
         }
         save_dir = cfg.checkpoint.checkpoint_dir
@@ -357,17 +357,17 @@ def main(cfg: DictConfig):
         actor.load_state_dict(ckpt_dict["actor_state_dict"])
         critic.load_state_dict(ckpt_dict["critic_state_dict"])
         optim.load_state_dict(ckpt_dict["optim_state_dict"])
-        if target_env is not None:
-            try:
-                raw_env = target_env.unwrapped
-                while not isinstance(raw_env, TwoCarrierEnv) and raw_env is not None:
-                    raw_env = getattr(raw_env, "_env", raw_env.unwrapped)
-                if raw_env is not None:
-                    raw_env.vecnorm_mean = np.asarray(ckpt_dict["vecnorm_mean"], dtype=np.float64)
-                    raw_env.vecnorm_var = np.asarray(ckpt_dict["vecnorm_var"], dtype=np.float64)
-                    raw_env.vecnorm_frozen = ckpt_dict["vecnorm_frozen"]
-            except Exception as e:
-                print(f"⚠️ 恢复VecNorm统计量失败：{e}")
+        # if target_env is not None:
+        #     try:
+        #         raw_env = target_env.unwrapped
+        #         while not isinstance(raw_env, TwoCarrierEnv) and raw_env is not None:
+        #             raw_env = getattr(raw_env, "_env", raw_env.unwrapped)
+        #         if raw_env is not None:
+        #             raw_env.vecnorm_mean = np.asarray(ckpt_dict["vecnorm_mean"], dtype=np.float64)
+        #             raw_env.vecnorm_var = np.asarray(ckpt_dict["vecnorm_var"], dtype=np.float64)
+        #             raw_env.vecnorm_frozen = ckpt_dict["vecnorm_frozen"]
+        #     except Exception as e:
+        #         print(f"⚠️ 恢复VecNorm统计量失败：{e}")
         return ckpt_dict["cfg"], ckpt_dict["collected_frames"]
 
     save_interval = cfg.checkpoint.save_interval

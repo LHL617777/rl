@@ -107,23 +107,49 @@ class TwoCarrierEnv(gym.Env):
         self.ax = None
         self.is_sim_finished = False
         
-        # VecNorm 初始化
-        self.vecnorm_decay = 0.99999
-        self.vecnorm_eps = 1e-2
-        self.vecnorm_frozen = vecnorm_frozen
-        self.vecnorm_min_var = 1e-4
-        self.vecnorm_count = 0
+        # # VecNorm 初始化
+        # self.vecnorm_decay = 0.99999
+        # self.vecnorm_eps = 1e-2
+        # self.vecnorm_frozen = vecnorm_frozen
+        self.vecnorm_frozen = True  # 强制冻结
+        # self.vecnorm_min_var = 1e-4
+        # self.vecnorm_count = 0
         
-        if vecnorm_mean is not None and vecnorm_var is not None:
-            self.vecnorm_mean = np.array(vecnorm_mean, dtype=np.float64)
-            self.vecnorm_var = np.array(vecnorm_var, dtype=np.float64)
-            self.vecnorm_var = np.maximum(self.vecnorm_var, self.vecnorm_min_var)
-            self.vecnorm_frozen = True
-            print(f"【TwoCarrierEnv】已加载固定归一化统计量，VecNorm 状态已冻结。")
-        else:
-            self.vecnorm_frozen = vecnorm_frozen
-            self.vecnorm_mean = np.zeros(12, dtype=np.float64) 
-            self.vecnorm_var = np.ones(12, dtype=np.float64) * self.vecnorm_min_var
+        # if vecnorm_mean is not None and vecnorm_var is not None:
+        #     self.vecnorm_mean = np.array(vecnorm_mean, dtype=np.float64)
+        #     self.vecnorm_var = np.array(vecnorm_var, dtype=np.float64)
+        #     self.vecnorm_var = np.maximum(self.vecnorm_var, self.vecnorm_min_var)
+        #     self.vecnorm_frozen = True
+        #     print(f"【TwoCarrierEnv】已加载固定归一化统计量，VecNorm 状态已冻结。")
+        # else:
+        #     self.vecnorm_frozen = vecnorm_frozen
+        #     self.vecnorm_mean = np.zeros(12, dtype=np.float64) 
+        #     self.vecnorm_var = np.ones(12, dtype=np.float64) * self.vecnorm_min_var
+
+        # 【替换方案】静态物理归一化参数
+        # 即使在并行训练中，这些值在每个进程里也是一样的，无需同步
+        # =================================================================
+        # 定义理想值 (Mean)
+        self.phys_mean = np.array([
+            3.5,  0.0,    # [0-1] Pos: 理想距离5m, 偏差0
+            1.0,  0.0,    # [2-3] Vel: 理想纵向速度0m/s, 侧向0
+            0.0,  0.0,    # [4-5] Angle
+            0.0,          # [6]   Psi_dot
+            0.0,  0.0,    # [7-8] Psi_dot_rel
+            0.0,  0.0,    # [9-10] Force
+            0.0           # [11]  Placeholder
+        ], dtype=np.float64)
+
+        # 定义敏感度范围 (Std) - 类似于你希望网络“关注”的波动幅度
+        self.phys_std = np.array([
+            2.0,  1.0,    # Pos: 关注 ±2m 的纵向波动
+            2.0,  1.0,    # Vel
+            0.8,  0.8,    # Angle: 关注 ±1弧度 (约57度)
+            1.0,          # Psi_dot
+            1.0,  1.0,    # Psi_dot_rel
+            2000.0, 2000.0, # Force: 关注 ±2000N 的力
+            1.0
+        ], dtype=np.float64)
         
         self.hinge_force_penalty = 0.0
         self.control_smooth_penalty = 0.0
@@ -374,8 +400,14 @@ class TwoCarrierEnv(gym.Env):
             0.0                           # [11] Placeholder
         ], dtype=np.float64)
         
-        self._update_vecnorm_stats(raw_obs)
-        return self._normalize_observation(raw_obs)
+        # self._update_vecnorm_stats(raw_obs)
+        # 【核心修改】直接使用静态参数归一化
+        # 加上 1e-6 防止除以0
+        norm_obs = (raw_obs - self.phys_mean) / (self.phys_std + 1e-6)
+        
+        # 安全裁剪，防止极端物理情况炸梯度
+        norm_obs = np.clip(norm_obs, -10.0, 10.0)
+        return norm_obs
     
     def _calculate_reward(self):
         """
