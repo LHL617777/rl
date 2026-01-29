@@ -32,7 +32,7 @@ except ImportError as e:
 
 # ===================== 工具函数 =====================
 
-def create_raw_env(cfg, render_mode, config_path, enable_visualization, vecnorm_frozen):
+def create_raw_env(cfg, render_mode, config_path, enable_visualization):
     # 优先使用传入的 config_path，其次尝试从 cfg 中获取
     env_config_path = getattr(cfg.env, 'config_path', None) if hasattr(cfg, 'env') else None
     final_config_path = config_path if config_path is not None else env_config_path
@@ -42,22 +42,20 @@ def create_raw_env(cfg, render_mode, config_path, enable_visualization, vecnorm_
     env = TwoCarrierEnv(
         render_mode=render_mode,
         config_path=final_config_path,
-        enable_visualization=enable_visualization,
-        vecnorm_frozen=vecnorm_frozen
+        enable_visualization=enable_visualization
     )
     return env
 
 def extract_deterministic_action(model_output, device):
-    if isinstance(model_output, torch.Tensor):
-        action = model_output
-    elif isinstance(model_output, tuple):
-        action = model_output[0] 
-    else:
-        action = model_output
+    # 如果输出是 TensorDict (TorchRL 常见输出)，直接取 loc 或 action
+    if hasattr(model_output, "get"):
+        return model_output.get("action")
     
-    if not isinstance(action, torch.Tensor):
-        action = torch.tensor(action, device=device)
-    return torch.clamp(action, -1.0, 1.0)
+    # 如果是元组，通常 (action, log_prob)
+    if isinstance(model_output, tuple):
+        return model_output[0]
+        
+    return model_output
 
 # ===================== 核心逻辑 =====================
 
@@ -79,28 +77,14 @@ def load_checkpoint(ckpt_path, device):
     actor.load_state_dict(ckpt["actor_state_dict"])
     actor.eval()
     
-    # 【修复点】：补全 env.set_vecnorm_state 所需的所有键
-    vecnorm_state = {
-        "vecnorm_mean": ckpt.get("vecnorm_mean", np.zeros(12, dtype=np.float64)),
-        "vecnorm_var": ckpt.get("vecnorm_var", np.ones(12, dtype=np.float64) * 1e-4),
-        "vecnorm_count": ckpt.get("vecnorm_count", 1e4),      # 缺少的键：计数
-        "vecnorm_decay": ckpt.get("vecnorm_decay", 0.99999),  # 缺少的键：衰减率
-        "vecnorm_eps": ckpt.get("vecnorm_eps", 1e-2),         # 缺少的键：Epsilon
-        "vecnorm_frozen": True # 离线评估强制冻结
-    }
-    
-    # 如果 checkpoint 中本身就有完整的 state 字典，则更新之
-    if "vecnorm_state" in ckpt:
-        vecnorm_state.update(ckpt["vecnorm_state"])
-        
     print(f"✅ Model loaded. Frames: {ckpt.get('collected_frames', 'N/A')}")
-    return actor, cfg, vecnorm_state
+    return actor, cfg
 
 def run_simulation(args):
     # 处理设备参数
     device = torch.device(args.device if torch.cuda.is_available() and "cuda" in args.device else "cpu")
     
-    actor, cfg, vecnorm_state = load_checkpoint(args.ckpt_path, device)
+    actor, cfg = load_checkpoint(args.ckpt_path, device)
     
     # 根据参数决定渲染模式
     render_mode = "rgb_array" if args.enable_visualization else None
@@ -109,18 +93,9 @@ def run_simulation(args):
         cfg, 
         render_mode,
         args.config_path,
-        args.enable_visualization,
-        vecnorm_frozen=True
+        args.enable_visualization
     )
     
-    try:
-        env.set_vecnorm_state(vecnorm_state)
-        env.freeze_vecnorm()
-    except AttributeError:
-        # 兼容性处理：如果环境没有 set_vecnorm_state 方法，尝试直接赋值
-        env.vecnorm_mean = vecnorm_state["vecnorm_mean"]
-        env.vecnorm_var = vecnorm_state["vecnorm_var"]
-        env.vecnorm_frozen = True
 
     # 视频保存逻辑
     video_dir = args.video_dir if args.video_dir else os.path.join(os.path.dirname(args.ckpt_path), "videos")

@@ -33,9 +33,6 @@ def make_env(
     from_pixels: bool = False,
     render_mode=None,  # 自定义参数：渲染模式
     enable_visualization: bool = False,  # 自定义参数：可视化开关
-    vecnorm_frozen: bool = False,  # 新增：VecNorm冻结标记，训练=False（默认），评测=True
-    vecnorm_mean=None,
-    vecnorm_var=None,
     shared_w_force=None
 ):
     """
@@ -49,10 +46,6 @@ def make_env(
         gymnasium_kwargs = {
             "render_mode": render_mode,
             "enable_visualization": enable_visualization,
-            # 新增：将VecNorm冻结标记传递给TwoCarrierEnv
-            "vecnorm_frozen": vecnorm_frozen,
-            "vecnorm_mean": vecnorm_mean,
-            "vecnorm_var": vecnorm_var,
             "shared_w_force": shared_w_force
         }
     
@@ -65,7 +58,7 @@ def make_env(
         pixels_only=False,
         device=device,
         disable_env_checker=True,  # 新增：关闭被动环境检查器，避免观测空间警告
-        **gymnasium_kwargs  # 解包传递自定义参数（含vecnorm_frozen）
+        **gymnasium_kwargs 
     )
 
     # =============== 【核心修复 2/2】 =================
@@ -188,7 +181,6 @@ def make_ppo_models_state(proof_environment, device):
 
 def make_ppo_models(env_name, device):
     """创建PPO模型，适配归一化观测环境"""
-    # 构建验证环境（默认vecnorm_frozen=False，不影响模型输入维度）
     proof_environment = make_env(env_name, device=device)
     actor, critic = make_ppo_models_state(proof_environment, device=device)
     return actor, critic
@@ -216,21 +208,12 @@ def eval_model(actor, test_env, num_episodes=3, eval_round=None):
     """
     test_rewards = []
     
-    # 提前解除环境包装，获取原始 TwoCarrierEnv 实例（验证VecNorm状态+视频生成）
+    # 提前解除环境包装，获取原始 TwoCarrierEnv 实例）
     try:
         raw_test_env = test_env.unwrapped
-        # 优化：精准获取TwoCarrierEnv实例，验证VecNorm冻结状态
+        # 优化：精准获取TwoCarrierEnv实例
         while not isinstance(raw_test_env, TwoCarrierEnv) and raw_test_env is not None:
             raw_test_env = getattr(raw_test_env, "_env", raw_test_env.unwrapped)
-        
-        if raw_test_env is not None:
-            # 验证：打印评测环境VecNorm状态，确保已冻结
-            print(f"✅ 成功获取原始 TwoCarrierEnv 实例，VecNorm冻结状态：{raw_test_env.vecnorm_frozen}")
-            if not raw_test_env.vecnorm_frozen:
-                print("⚠️ 评测环境VecNorm未冻结，强制设置为True以保证一致性")
-                raw_test_env.vecnorm_frozen = True
-        else:
-            print("❌ 未获取到原始 TwoCarrierEnv 实例，无法生成本地视频")
     except Exception as e:
         raw_test_env = None
         print(f"❌ 获取原始环境实例失败，无法生成本地视频：{type(e).__name__}: {e}")

@@ -24,8 +24,7 @@ class TwoCarrierEnv(gym.Env):
     """两辆车运载超大件系统的自定义强化学习环境"""
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 5}
 
-    def __init__(self, render_mode=None, config_path=None, enable_visualization=False, 
-                 vecnorm_frozen: bool=False, vecnorm_mean=None, vecnorm_var=None, shared_w_force=None):
+    def __init__(self, render_mode=None, config_path=None, enable_visualization=False, shared_w_force=None):
         super().__init__()
         
         # 加载2d2c.yaml配置文件
@@ -53,7 +52,7 @@ class TwoCarrierEnv(gym.Env):
         # [11] Placeholder   : 预留位 (如前车距离等，目前为0.0)
         # =========================================================================================
         
-        # 定义物理边界（主要用于参考，VecNorm会处理实际数值范围）
+        # 定义物理边界
         obs_low = np.array([
             -np.inf, -np.inf,       # Local Pos
             -20, -20,               # Body Vel
@@ -107,28 +106,6 @@ class TwoCarrierEnv(gym.Env):
         self.ax = None
         self.is_sim_finished = False
         
-        # # VecNorm 初始化
-        # self.vecnorm_decay = 0.99999
-        # self.vecnorm_eps = 1e-2
-        # self.vecnorm_frozen = vecnorm_frozen
-        self.vecnorm_frozen = True  # 强制冻结
-        # self.vecnorm_min_var = 1e-4
-        # self.vecnorm_count = 0
-        
-        # if vecnorm_mean is not None and vecnorm_var is not None:
-        #     self.vecnorm_mean = np.array(vecnorm_mean, dtype=np.float64)
-        #     self.vecnorm_var = np.array(vecnorm_var, dtype=np.float64)
-        #     self.vecnorm_var = np.maximum(self.vecnorm_var, self.vecnorm_min_var)
-        #     self.vecnorm_frozen = True
-        #     print(f"【TwoCarrierEnv】已加载固定归一化统计量，VecNorm 状态已冻结。")
-        # else:
-        #     self.vecnorm_frozen = vecnorm_frozen
-        #     self.vecnorm_mean = np.zeros(12, dtype=np.float64) 
-        #     self.vecnorm_var = np.ones(12, dtype=np.float64) * self.vecnorm_min_var
-
-        # 【替换方案】静态物理归一化参数
-        # 即使在并行训练中，这些值在每个进程里也是一样的，无需同步
-        # =================================================================
         # 定义理想值 (Mean)
         self.phys_mean = np.array([
             3.5,  0.0,    # [0-1] Pos: 理想距离5m, 偏差0
@@ -156,7 +133,7 @@ class TwoCarrierEnv(gym.Env):
         # 保存共享变量
         self.shared_w_force = shared_w_force
         # 默认初始权重 (如果没传共享变量，就用这个默认值)
-        self.default_w_force = 0.005
+        self.default_w_force = 1.0
 
     def _load_config(self, config_path):
         if config_path is None:
@@ -303,35 +280,6 @@ class TwoCarrierEnv(gym.Env):
         orig_action = self.original_action_low + (normalized_action + 1) * orig_range / 2
         return np.clip(orig_action, self.original_action_low, self.original_action_high).astype(np.float64)
 
-    def _update_vecnorm_stats(self, obs):
-        if self.vecnorm_frozen:
-            return
-        obs_np = np.asarray(obs, dtype=np.float64)
-        if self.vecnorm_mean is None:
-            self.vecnorm_mean = np.zeros_like(obs_np, dtype=np.float64)
-            self.vecnorm_var = np.ones_like(obs_np, dtype=np.float64)
-        
-        current_mean = obs_np
-        current_var = np.square(obs_np)
-        current_count = 1
-
-        self.vecnorm_count += current_count
-        if self.vecnorm_count <= current_count:
-            self.vecnorm_mean = current_mean
-            self.vecnorm_var = current_var
-        else:
-            decay = self.vecnorm_decay
-            self.vecnorm_mean = decay * self.vecnorm_mean + (1 - decay) * current_mean
-            self.vecnorm_var = decay * self.vecnorm_var + (1 - decay) * current_var
-        self.vecnorm_var = np.maximum(self.vecnorm_var, self.vecnorm_min_var)
-
-    def _normalize_observation(self, obs):
-        if self.vecnorm_mean is None:
-            return obs
-        obs_np = np.asarray(obs, dtype=np.float64)
-        std_np = np.sqrt(self.vecnorm_var) + self.vecnorm_eps
-        normalized_obs_np = (obs_np - self.vecnorm_mean) / std_np
-        return normalized_obs_np.astype(obs.dtype) if hasattr(obs, 'dtype') else normalized_obs_np
 
     def _transform_to_local(self, x_target, y_target, x_self, y_self, psi_self):
         """
@@ -400,7 +348,6 @@ class TwoCarrierEnv(gym.Env):
             0.0                           # [11] Placeholder
         ], dtype=np.float64)
         
-        # self._update_vecnorm_stats(raw_obs)
         # 【核心修改】直接使用静态参数归一化
         # 加上 1e-6 防止除以0
         norm_obs = (raw_obs - self.phys_mean) / (self.phys_std + 1e-6)
@@ -497,7 +444,7 @@ class TwoCarrierEnv(gym.Env):
         if self.shared_w_force is not None:
              w_force = self.shared_w_force.value
         else:
-             w_force = 50.0
+             w_force = 1.0
         
         w_align = 2.0
         w_stability = 0.3
@@ -619,6 +566,9 @@ class TwoCarrierEnv(gym.Env):
         if seed is not None:
             self.rng = np.random.default_rng(seed)
         
+        # ================== 【新增】生成随机路径 ==================
+        self._generate_random_spline_path()
+        # ========================================================
             
         # ================== 【新增】在这里实现每回合随机速度 ==================
         # 这样每次环境重置，速度都是新的（例如第一把 0.3，第二把 0.8）
@@ -632,10 +582,6 @@ class TwoCarrierEnv(gym.Env):
         self.config['X_dot_o_0'] = vx_init
         self.config['Y_dot_o_0'] = vy_init
         # ================================================================
-
-        # ================== 【新增】生成随机路径 ==================
-        self._generate_random_spline_path()
-        # ========================================================
 
         # 重新初始化模型（或者仅重置状态，取决于你的实现偏好）
         # 推荐保留这行，确保模型参数彻底更新
@@ -651,7 +597,7 @@ class TwoCarrierEnv(gym.Env):
         )
         if hasattr(self, '_prev_u1_noisy'): del self._prev_u1_noisy
         
-        if not self.vecnorm_frozen:
+        if True:
             # Warmup
             zero_action = np.zeros(4)
             for _ in range(5):
@@ -689,34 +635,6 @@ class TwoCarrierEnv(gym.Env):
         self._record_trajectories()
         return observation, {}
 
-    def freeze_vecnorm(self):
-        """冻结 VecNorm 统计量"""
-        self.vecnorm_frozen = True
-        print("观测归一化统计量已冻结，进入评测模式")
-
-    def unfreeze_vecnorm(self):
-        """解冻 VecNorm 统计量"""
-        self.vecnorm_frozen = False
-        print("观测归一化统计量已解冻，进入训练模式")
-
-    def get_vecnorm_state(self):
-        return {
-            "vecnorm_mean": self.vecnorm_mean,
-            "vecnorm_var": self.vecnorm_var,
-            "vecnorm_count": self.vecnorm_count,
-            "vecnorm_decay": self.vecnorm_decay,
-            "vecnorm_eps": self.vecnorm_eps,
-            "vecnorm_frozen": self.vecnorm_frozen
-        }
-
-    def set_vecnorm_state(self, vecnorm_state):
-        self.vecnorm_mean = vecnorm_state["vecnorm_mean"]
-        self.vecnorm_var = vecnorm_state["vecnorm_var"]
-        self.vecnorm_count = vecnorm_state["vecnorm_count"]
-        self.vecnorm_decay = vecnorm_state["vecnorm_decay"]
-        self.vecnorm_eps = vecnorm_state["vecnorm_eps"]
-        self.vecnorm_frozen = vecnorm_state["vecnorm_frozen"]
-        print("观测归一化状态已从 checkpoint 加载完成")
 
     def mark_sim_finished(self):
         self.is_sim_finished = True

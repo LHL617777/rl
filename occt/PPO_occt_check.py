@@ -38,18 +38,11 @@ from utils_ppo_occt import eval_model, make_env, make_ppo_models
 def make_train_env_wrapper(env_name, device, shared_w_force):
     """
     用于在子进程中创建环境的包装函数。
-    根据用户需求，并行运行时 VecNorm 是固定的 (frozen=True)。
     """
     return make_env(
         env_name,
         device=device,  # 子进程通常建议用 CPU，由 Collector 统一传到 GPU
-        shared_w_force=shared_w_force,
-        vecnorm_frozen=True,  # 用户指定：固定统计量
-        # vecnorm_mean=fixed_mean,
-        # vecnorm_var=fixed_var
-        # vecnorm_frozen=False,  # <--- 关键：解冻，开始统计
-        # vecnorm_mean=None,     # <--- 关键：清空旧均值
-        # vecnorm_var=None       # <--- 关键：清空旧方差
+        shared_w_force=shared_w_force
     )
 
 
@@ -145,13 +138,6 @@ def main(cfg: DictConfig):
             create_env_fn=train_env_factory,
             serial_for_single=True, # 如果 num_envs=1 自动切回串行
         ),
-        # create_env_fn=lambda: make_env(  # 用lambda封装，传递VecNorm状态参数
-        #     cfg.env.env_name,
-        #     device,
-        #     vecnorm_frozen=False,  # 训练环境：不冻结VecNorm，统计量随训练更新
-        #     vecnorm_mean=FIXED_MEAN,
-        #     vecnorm_var=FIXED_VAR
-        # ),
         policy=actor,
         frames_per_batch=cfg.collector.frames_per_batch,
         total_frames=cfg.collector.total_frames,
@@ -205,57 +191,13 @@ def main(cfg: DictConfig):
     del actor_optim, critic_optim
 
     def save_checkpoint(current_frames):
-        # """封装Checkpoint保存逻辑，适配cfg配置，新增VecNorm统计量保存"""
-        # # 关键：提取训练环境的原始TwoCarrierEnv实例，获取VecNorm统计量
-        # raw_train_env = None
-        # vecnorm_mean = np.zeros(12, dtype=np.float64)
-        # vecnorm_var = np.ones(12, dtype=np.float64) * 1e-4  # 与环境默认最小方差一致
-        # vecnorm_frozen = False
-
-        # try:
-        #     # 解包torchrl Collector的环境实例，获取原始TwoCarrierEnv
-        #     train_env_instance = collector.env
-        #     raw_train_env = train_env_instance.unwrapped
-        #     while not isinstance(raw_train_env, TwoCarrierEnv) and raw_train_env is not None:
-        #         raw_train_env = getattr(raw_train_env, "_env", raw_train_env.unwrapped)
-            
-        #     if raw_train_env is not None:
-        #         # 提取VecNorm统计量
-        #         vecnorm_mean = raw_train_env.vecnorm_mean.copy()
-        #         vecnorm_var = raw_train_env.vecnorm_var.copy()
-        #         vecnorm_frozen = raw_train_env.vecnorm_frozen
-        # except Exception as e:
-        #     print(f"⚠️ 获取训练环境VecNorm统计量失败（不影响模型保存）：{e}")
-
-        # # 构造Checkpoint字典，新增VecNorm相关内容
-        # ckpt_dict = {
-        #     "actor_state_dict": actor.state_dict(),
-        #     "critic_state_dict": critic.state_dict(),
-        #     "optim_state_dict": optim.state_dict(),
-        #     "cfg": cfg,
-        #     "collected_frames": current_frames,
-        #     # 新增：VecNorm统计量，用于后续加载时恢复归一化分布
-        #     "vecnorm_mean": vecnorm_mean,
-        #     "vecnorm_var": vecnorm_var,
-        #     "vecnorm_frozen": vecnorm_frozen,
-        # }
-        # save_dir = cfg.checkpoint.checkpoint_dir
-        # os.makedirs(save_dir, exist_ok=True)
-        # save_path = os.path.join(save_dir, f"checkpoint_{current_frames}_frames.pt")
-        # torch.save(ckpt_dict, save_path)
-        # print(f"\n✅ Checkpoint saved to: {save_path}")
-
-        """仅保存模型和配置，VecNorm使用代码中固定的值"""
+        """仅保存模型和配置值"""
         ckpt_dict = {
             "actor_state_dict": actor.state_dict(),
             "critic_state_dict": critic.state_dict(),
             "optim_state_dict": optim.state_dict(),
             "cfg": cfg,
-            "collected_frames": current_frames,
-            # 直接保存固定的统计量，或者保存 None，取决于后续加载需求
-            # "vecnorm_mean": np.array(FIXED_MEAN),
-            # "vecnorm_var": np.array(FIXED_VAR),
-            "vecnorm_frozen": True,
+            "collected_frames": current_frames
         }
         save_dir = cfg.checkpoint.checkpoint_dir
         os.makedirs(save_dir, exist_ok=True)
@@ -271,17 +213,6 @@ def main(cfg: DictConfig):
         actor.load_state_dict(ckpt_dict["actor_state_dict"])
         critic.load_state_dict(ckpt_dict["critic_state_dict"])
         optim.load_state_dict(ckpt_dict["optim_state_dict"])
-        # if target_env is not None:
-        #     try:
-        #         raw_env = target_env.unwrapped
-        #         while not isinstance(raw_env, TwoCarrierEnv) and raw_env is not None:
-        #             raw_env = getattr(raw_env, "_env", raw_env.unwrapped)
-        #         if raw_env is not None:
-        #             raw_env.vecnorm_mean = np.asarray(ckpt_dict["vecnorm_mean"], dtype=np.float64)
-        #             raw_env.vecnorm_var = np.asarray(ckpt_dict["vecnorm_var"], dtype=np.float64)
-        #             raw_env.vecnorm_frozen = ckpt_dict["vecnorm_frozen"]
-        #     except Exception as e:
-        #         print(f"⚠️ 恢复VecNorm统计量失败：{e}")
         return ckpt_dict["cfg"], ckpt_dict["collected_frames"]
     
     # ================= [新增] 断点重训/预训练加载逻辑 =================
@@ -351,9 +282,7 @@ def main(cfg: DictConfig):
         from_pixels=logger_video,
         render_mode=None,
         enable_visualization=False,
-        vecnorm_frozen=True,
-        # vecnorm_mean=FIXED_MEAN,
-        # vecnorm_var=FIXED_VAR
+        shared_w_force=shared_w_force
     )
     test_env.eval()
 
@@ -523,38 +452,6 @@ def main(cfg: DictConfig):
                 eval_round_counter += 1
                 actor.eval()
                 print(f"\n============= 开始第 {eval_round_counter} 轮评测 =============")
-                # train_vecnorm_mean = np.zeros(12, dtype=np.float64)
-                # train_vecnorm_var = np.ones(12, dtype=np.float64) * 1e-4
-                # try:
-                #     # 解包训练环境，获取最新的mean/var（复用你现有Checkpoint中的提取逻辑）
-                #     raw_train_env = collector.env.unwrapped
-                #     while not isinstance(raw_train_env, TwoCarrierEnv) and raw_train_env is not None:
-                #         raw_train_env = getattr(raw_train_env, "_env", raw_train_env.unwrapped)
-                    
-                #     if raw_train_env is not None:
-                #         train_vecnorm_mean = raw_train_env.vecnorm_mean.copy()
-                #         train_vecnorm_var = raw_train_env.vecnorm_var.copy()
-                #         # print(f"✅ 提取到训练环境最新VecNorm：均值前5维 {train_vecnorm_mean[:5].round(6)}，方差前5维 {train_vecnorm_var[:5].round(6)}")
-                # except Exception as e:
-                #     print(f"⚠️ 提取训练环境VecNorm失败，将使用默认值：{e}")
-
-                # # ===== 新增：步骤2 - 同步到test_env，并确保冻结 =====
-                # try:
-                #     raw_test_env = test_env.unwrapped
-                #     while not isinstance(raw_test_env, TwoCarrierEnv) and raw_test_env is not None:
-                #         raw_test_env = getattr(raw_test_env, "_env", raw_test_env.unwrapped)
-                    
-                #     if raw_test_env is not None:
-                #         # 覆盖test_env的初始mean/var为训练环境的最新值
-                #         raw_test_env.vecnorm_mean = train_vecnorm_mean
-                #         raw_test_env.vecnorm_var = train_vecnorm_var
-                #         # 强制确认冻结，避免意外更新
-                #         raw_test_env.vecnorm_frozen = True
-                #         # print(f"✅ 已将训练环境VecNorm同步到test_env，且保持冻结状态")
-                # except Exception as e:
-                #     print(f"⚠️ 同步VecNorm到test_env失败：{e}")
-
-                # Test Env 已经初始化为 FIXED_MEAN/VAR 且 Frozen，直接跑即可
                 test_rewards = eval_model(
                     actor, test_env, num_episodes=cfg_logger_num_test_episodes, eval_round=eval_round_counter
                 )
