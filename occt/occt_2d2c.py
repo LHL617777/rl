@@ -395,8 +395,7 @@ class TwoCarrierEnv(gym.Env):
         Y_dot_cargo = x[self.config['N_q'] + 1]
         v_effective = X_dot_cargo * dir_x + Y_dot_cargo * dir_y
         
-        target_speed = 1.0
-        r_progress = np.clip(v_effective, -0.5, target_speed)
+        r_progress = v_effective
 
         # =================================================================
         # 【核心修改】双重门控机制 (Double Gating)
@@ -556,7 +555,7 @@ class TwoCarrierEnv(gym.Env):
         
         if d_rear > TERMINATE_ANGLE or d_front > TERMINATE_ANGLE:
             terminated = True
-            reward -= 500.0  # 给一个固定的死亡惩罚，代替那是几千分的持续惩罚
+            reward -= 700.0  # 给一个固定的死亡惩罚，代替那是几千分的持续惩罚
             info['termination_reason'] = 'jackknife'
 
         return observation, reward, terminated, truncated, info
