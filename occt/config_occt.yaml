@@ -12,9 +12,9 @@ collector:
 # logger
 logger:
   backend: swanlab
-  project_name: torchrl_example_ppo
+  project_name: new_obs_vec_occt
   group_name: null
-  exp_name: OCCT_PPO_experiment
+  exp_name: v0
   test_interval: 20480
   num_test_episodes: 5
   video: False
