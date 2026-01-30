@@ -78,7 +78,7 @@ class TwoCarrierEnv(gym.Env):
         )
         
         # 动作空间保持不变
-        self.original_action_low = np.array([-np.pi/6, -np.pi/6, 0, 0])
+        self.original_action_low = np.array([-np.pi/6, -np.pi/6, -1e3, -1e3])
         self.original_action_high = np.array([np.pi/6, np.pi/6, 1e3, 1e3])
         self.action_space = spaces.Box(
             low=-np.ones(4, dtype=np.float64),
@@ -600,7 +600,8 @@ class TwoCarrierEnv(gym.Env):
             # Warmup
             zero_action = np.zeros(4)
             for _ in range(5):
-                self.model.step(np.concatenate([self.u1_random, zero_action]))
+                u1_warmup = self._get_spline_tracking_u1()
+                self.model.step(np.concatenate([u1_warmup, zero_action]))
                 _ = self._get_observation()
             
             # Reset Model State
