@@ -97,9 +97,12 @@ class ModelBase:
                     ax.add_patch(handle_o)
                 # 4 handle_c：载体绘图句柄
                 handle_c = []
-                for polygon in polygons_c:
+                for idx, polygon in enumerate(polygons_c):
+                    # ✅ 修改：根据索引取出对应的颜色
+                    color = self.config['fc_c'][idx] if isinstance(self.config['fc_c'], list) else self.config['fc_c']
+                    
                     handle_c.append(Polygon(polygon, zorder=2.3,
-                                            alpha=self.config['alpha_c'], fc=self.config['fc_c']))
+                                            alpha=self.config['alpha_c'], fc=color))
                     ax.add_patch(handle_c[-1])
             else:
                 # 1

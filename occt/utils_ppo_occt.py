@@ -33,7 +33,8 @@ def make_env(
     from_pixels: bool = False,
     render_mode=None,  # 自定义参数：渲染模式
     enable_visualization: bool = False,  # 自定义参数：可视化开关
-    shared_w_force=None
+    shared_w_force=None,
+    capture_video_data: bool = False  # <--- 默认关闭，仅在评测时开启
 ):
     """
     创建环境（传env_name字符串，直接透传自定义参数，解决未知关键字参数错误）
@@ -65,7 +66,7 @@ def make_env(
     # set_info_dict_reader 需要一个函数，而不是列表。
     # 使用 default_info_dict_reader(["key"]) 来生成这个函数。
     # 这会告诉 TorchRL："请生成一个函数，这个函数专门去 info 里抓取 'reward_details' 字段"
-    reward_keys = [
+    info_keys_to_capture = [
         "reward_r_force", 
         "reward_r_align_rear", 
         "reward_r_align_front", 
@@ -76,8 +77,15 @@ def make_env(
         "reward_val_delta_psi_rear",
         "reward_val_delta_psi_front"
     ]
+    if capture_video_data:
+        info_keys_to_capture.extend([
+            "full_state",
+            "u1",
+            "u2_original",
+            "Fh2"
+        ])
     base_env.set_info_dict_reader(
-        info_dict_reader=default_info_dict_reader(reward_keys)
+        info_dict_reader=default_info_dict_reader(info_keys_to_capture)
     )
     # ==================================================
 
@@ -207,6 +215,8 @@ def eval_model(actor, test_env, num_episodes=3, eval_round=None):
     :return: 所有 episode 奖励的均值
     """
     test_rewards = []
+    save_dir = "./checkpoints_occt/eval_trajectories"
+    os.makedirs(save_dir, exist_ok=True)
     
     # 提前解除环境包装，获取原始 TwoCarrierEnv 实例）
     try:
@@ -231,6 +241,15 @@ def eval_model(actor, test_env, num_episodes=3, eval_round=None):
         # 步骤2：提取并缓存本轮 episode 奖励（保持原有逻辑，不变）
         reward = td_test["next", "episode_reward"][td_test["next", "done"]]
         test_rewards.append(reward.cpu())
+
+        # === 【新增】保存 TensorDict 到文件 ===
+        # 文件名格式: round_{轮次}_ep_{序号}_rew_{奖励}.pt
+        rew_val = int(reward.item())
+        save_path = os.path.join(save_dir, f"round_{eval_round}_ep_{episode_idx}_rew_{rew_val}.pt")
+        
+        # 我们只需要保存 cpu 上的数据，且不需要梯度
+        torch.save(td_test.detach().cpu(), save_path)
+        print(f"💾 评测数据已保存: {save_path}")
         
         # # 步骤3：自定义视频生成（每 episode 结束后保存独立视频，保持原有逻辑）
         # if raw_test_env is not None and raw_test_env.enable_visualization and raw_test_env.render_mode == "rgb_array":

@@ -42,7 +42,8 @@ def make_train_env_wrapper(env_name, device, shared_w_force):
     return make_env(
         env_name,
         device=device,  # 子进程通常建议用 CPU，由 Collector 统一传到 GPU
-        shared_w_force=shared_w_force
+        shared_w_force=shared_w_force,
+        capture_video_data=False  # 训练时不捕获视频数据
     )
 
 
@@ -282,7 +283,8 @@ def main(cfg: DictConfig):
         from_pixels=logger_video,
         render_mode=None,
         enable_visualization=False,
-        shared_w_force=shared_w_force
+        shared_w_force=shared_w_force,
+        capture_video_data=True  # 评测时捕获视频数据
     )
     test_env.eval()
 

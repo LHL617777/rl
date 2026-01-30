@@ -516,13 +516,15 @@ class TwoCarrierEnv(gym.Env):
             "reward_val_force": np.array(self.reward_info.get("val_force", 0.0), dtype=np.float32),
             "reward_val_delta_psi_rear": np.array(self.reward_info.get("val_delta_psi_rear", 0.0), dtype=np.float32),
             "reward_val_delta_psi_front": np.array(self.reward_info.get("val_delta_psi_front", 0.0), dtype=np.float32),
-            'Fh2': (self.model.Fh_arch[self.model.count, 2], 
-                    self.model.Fh_arch[self.model.count, 3]),
-            'pos_error': np.hypot(X2 - X1, Y2 - Y1),
-            'u1': u1,
-            'u2_normalized': action,
-            'u2_original': original_action,
-            'x': np.array([X1, Y1, X2, Y2]),
+            "Fh2": np.array([
+                self.model.Fh_arch[self.model.count, 2], 
+                self.model.Fh_arch[self.model.count, 3]
+            ], dtype=np.float32),
+            "pos_error": np.hypot(X2 - X1, Y2 - Y1),
+            "u1": u1,
+            "u2_normalized": action,
+            "u2_original": original_action,
+            "full_state": self.model.x.copy(),
             "hinge_force_penalty": self.hinge_force_penalty,
             "control_smooth_penalty": self.control_smooth_penalty
         }
@@ -633,7 +635,39 @@ class TwoCarrierEnv(gym.Env):
         self.is_sim_finished = False
         observation = self._get_observation()
         self._record_trajectories()
-        return observation, {}
+
+        # 获取当前状态用于填充
+        current_full_state = self.model.x.copy()
+
+        info = {
+            # --- 向量/数组类型 (必须给足空间！) ---
+            
+            # [4]维向量 (之前的报错就在这里，必须是 np.zeros(4) 而不是 0)
+            "u1": np.zeros(4, dtype=np.float64),              
+            "u2_normalized": np.zeros(4, dtype=np.float64),   
+            "u2_original": np.zeros(4, dtype=np.float64),     
+            
+            # [10]维向量 (full_state)
+            "full_state": current_full_state,                 
+            
+            # [2]维向量 (Fh2)
+            "Fh2": np.zeros(2, dtype=np.float64),             
+
+            # --- 标量类型 ---
+            "reward_r_force": np.array(0.0, dtype=np.float32),
+            "reward_r_align_rear": np.array(0.0, dtype=np.float32),
+            "reward_r_align_front": np.array(0.0, dtype=np.float32),
+            "reward_r_progress": np.array(0.0, dtype=np.float32),
+            "reward_r_stability": np.array(0.0, dtype=np.float32),
+            "reward_val_force": np.array(0.0, dtype=np.float32),
+            "reward_val_delta_psi_rear": np.array(0.0, dtype=np.float32),
+            "reward_val_delta_psi_front": np.array(0.0, dtype=np.float32),
+            "pos_error": 0.0,
+            "hinge_force_penalty": 0.0,
+            "control_smooth_penalty": 0.0,
+        }
+
+        return observation, info
 
 
     def mark_sim_finished(self):
