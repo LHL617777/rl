@@ -445,7 +445,7 @@ class TwoCarrierEnv(gym.Env):
         else:
              w_force = 1.0
         
-        w_align = 2.0
+        w_align = 10.0
         w_stability = 0.3
         
         # 总分包含：进度分、力分、对齐分（后车+前车）、稳定性分
@@ -545,7 +545,7 @@ class TwoCarrierEnv(gym.Env):
         # 【新增】折叠终止条件
         # 0.8 弧度 ≈ 45度，1.0 弧度 ≈ 57度。
         # 建议设宽一点点，给它救车的机会，但不能太宽。
-        TERMINATE_ANGLE = 1.2  # 约 68度
+        TERMINATE_ANGLE = 0.5  # 约 28度
         
         x = self.model.x
         Psi_cargo = x[2]
@@ -557,7 +557,7 @@ class TwoCarrierEnv(gym.Env):
         
         if d_rear > TERMINATE_ANGLE or d_front > TERMINATE_ANGLE:
             terminated = True
-            reward -= 700.0  # 给一个固定的死亡惩罚，代替那是几千分的持续惩罚
+            reward -= 100.0  # 给一个固定的死亡惩罚，代替那是几千分的持续惩罚
             info['termination_reason'] = 'jackknife'
 
         return observation, reward, terminated, truncated, info

@@ -773,12 +773,44 @@ class Model2D2C(ModelBase):
             alpha_f_i = np.atan2(vy_f_i, np.fabs(vx_i)) - delta_f_i
             alpha_r_i = np.atan2(vy_r_i, np.fabs(vx_i)) - delta_r_i
 
-            # Forces on front and rear axles in vehicle coordinate frame
-            Fx_f_i = np.cos(delta_f_i) * T_f_i - np.sin(delta_f_i) * (self.C_f * alpha_f_i)
-            Fy_f_i = np.sin(delta_f_i) * T_f_i + np.cos(delta_f_i) * (self.C_f * alpha_f_i)
-            Fx_r_i = np.cos(delta_r_i) * T_r_i - np.sin(delta_r_i) * (self.C_r * alpha_r_i)
-            Fy_r_i = np.sin(delta_r_i) * T_r_i + np.cos(delta_r_i) * (self.C_r * alpha_r_i)
+            # # Forces on front and rear axles in vehicle coordinate frame
+            # Fx_f_i = np.cos(delta_f_i) * T_f_i - np.sin(delta_f_i) * (self.C_f * alpha_f_i)
+            # Fy_f_i = np.sin(delta_f_i) * T_f_i + np.cos(delta_f_i) * (self.C_f * alpha_f_i)
+            # Fx_r_i = np.cos(delta_r_i) * T_r_i - np.sin(delta_r_i) * (self.C_r * alpha_r_i)
+            # Fy_r_i = np.sin(delta_r_i) * T_r_i + np.cos(delta_r_i) * (self.C_r * alpha_r_i)
+            
+            # ================= [PHYSICS FIX START] =================
+            # 基于 2d2c.yaml 参数计算的物理极限
+            # M=1368, lf=1.17, lr=1.25, g=9.8, mu=0.85
+            # 如果想更严谨，可以将这些 max 值作为类属性在 __init__ 里根据 M 计算
+            F_lat_max_f = 5885.0  # 前轮侧向力饱和值
+            F_lat_max_r = 5508.0  # 后轮侧向力饱和值
 
+            # 1. 计算原本的线性侧向力 (Linear Force)
+            # 注意：self.C_f 通常是负值，alpha 也是弧度
+            Fy_f_linear = self.C_f * alpha_f_i
+            Fy_r_linear = self.C_r * alpha_r_i
+
+            # 2. 应用平滑饱和模型 (Magic Formula 的简化版)
+            # 使用 tanh 函数模拟轮胎的非线性饱和特性
+            # 当力很小时，tanh(x) ≈ x，保持线性特性
+            # 当力很大时，tanh(x) 趋近于 1，力被限制在 F_max
+            
+            Fy_f_limited = F_lat_max_f * np.tanh(Fy_f_linear / F_lat_max_f)
+            Fy_r_limited = F_lat_max_r * np.tanh(Fy_r_linear / F_lat_max_r)
+
+            # 3. 如果需要更严格的硬截断（防止数值溢出），可以再加一层 clip，但 tanh 通常够了
+            # Fy_f_limited = np.clip(Fy_f_limited, -F_lat_max_f, F_lat_max_f)
+
+            # 4. 代入动力学方程 (替换原本直接使用 C_f * alpha 的部分)
+            # 注意：这里替换了原代码中的 self.C_f * alpha_f_i
+            Fx_f_i = np.cos(delta_f_i) * T_f_i - np.sin(delta_f_i) * Fy_f_limited
+            Fy_f_i = np.sin(delta_f_i) * T_f_i + np.cos(delta_f_i) * Fy_f_limited
+
+            Fx_r_i = np.cos(delta_r_i) * T_r_i - np.sin(delta_r_i) * Fy_r_limited
+            Fy_r_i = np.sin(delta_r_i) * T_r_i + np.cos(delta_r_i) * Fy_r_limited
+            # ================= [PHYSICS FIX END] =================
+            
             # Forces and moment on COG in vehicle coordinate frame
             Fx_v_i = Fx_f_i + Fx_r_i
             Fy_v_i = Fy_f_i + Fy_r_i
