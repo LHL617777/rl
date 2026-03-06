@@ -1,6 +1,6 @@
 # task and env
 env:
-  env_name: TwoCarrierEnv-v1.2
+  env_name: TwoCarrierEnv-v1
   num_envs: 8
 
 # collector
@@ -14,9 +14,9 @@ logger:
   backend: swanlab
   project_name: new_obs_vec_occt
   group_name: null
-  exp_name: v0
-  test_interval: 20480
-  num_test_episodes: 5
+  exp_name: v2.1(2048steps)
+  test_interval: 81920
+  num_test_episodes: 4
   video: False
   log_interval: 2048
   save_train_metrics: True
@@ -46,7 +46,8 @@ compile:
   cudagraphs: False
 
 checkpoint:
-  save_interval: 20480
+  save_interval: 81920
   keep_interval: 512_00
   checkpoint_dir: ./checkpoints_occt/
   load_path: null
+  # /home/yons/Graduation/rl/occt/outputs/2026-02-07/18-33-45/checkpoints_occt/checkpoint_8192000_frames.pt 1024steps的优秀版本地址

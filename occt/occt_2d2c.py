@@ -181,7 +181,7 @@ class TwoCarrierEnv(gym.Env):
         start_y = self.config.get('Y_o_0', 0) # 假设初始 Y 为 0
 
         # 2. 定义路径参数
-        total_length = 30.0  # 路径总长 (覆盖 max_episode_steps * speed)
+        total_length = 100  # 路径总长 (覆盖 max_episode_steps * speed)
         num_points = 4        # 控制点数量 (控制点越多，弯道越复杂)
         
         # 3. 生成控制点 (Control Points)
@@ -951,7 +951,7 @@ class TwoCarrierEnv(gym.Env):
 gym.register(
     id="TwoCarrierEnv-v1",
     entry_point="occt_2d2c:TwoCarrierEnv",
-    max_episode_steps=1024,
+    max_episode_steps=2048,
     kwargs={}
 )
 

@@ -61,10 +61,16 @@ class ModelBase:
 
         # Iterative plot
         dt_frame = 1 / self.config['framerate'] # 计算每帧视频对应的时间间隔
-        total_frames = round(self.T / dt_frame) + 1  # 新增：总帧数（用于日志）
+        max_video_time = self.T  # 新增：最大视频时间（用于日志）
+        total_frames =  int(np.floor(max_video_time / dt_frame)) + 1
+        print(f"[DEBUG] 仿真总时长T={self.T}s，帧间隔dt_frame={dt_frame}s，总帧数total_frames={total_frames}")
+        print(f"[DEBUG] 仿真步长dt={self.dt}s，x_arch总长度={self.x_arch.shape[0]}")
         for i_frame in range(total_frames):
             # Data for visualization
             i = round(i_frame * dt_frame / self.dt)
+            max_i = self.x_arch.shape[0] - 1  # x_arch的最大有效索引
+            i = min(i, max_i)  # 避免索引越界
+            if i < 0: i = 0    # 兜底：避免负数索引
             # 1 轮胎可视化数据
             segments_tire = self.getTireVis(i)
             # 2 获取铰链力和货物可视化数据。
