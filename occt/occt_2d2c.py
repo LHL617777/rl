@@ -171,103 +171,131 @@ class TwoCarrierEnv(gym.Env):
     
     def _generate_random_spline_path(self):
         """
-        [New Feature] 生成随机样条曲线路径供前车跟踪
-        生成的路径保存在 self.spline_func (函数) 和 self.path_x/y (可视化数据)
+        [New Feature] 生成基于累积弦长(s)的参数化随机样条曲线
+        彻底解决长距离弯道下 y=f(x) 的导数奇异与崩溃问题
         """
-        # 1. 确定起点 (前车初始位置)
-        # 注意：这里假设 Config 中的 X_o_0 是货物中心，我们需要估算前车大致位置
-        # 根据 config: x_front ≈ X_o_0 + x__o_1
         start_x = self.config.get('X_o_0', 0) + self.config.get('x__o_1', 5)
-        start_y = self.config.get('Y_o_0', 0) # 假设初始 Y 为 0
+        start_y = self.config.get('Y_o_0', 0)
 
-        # 2. 定义路径参数
-        total_length = 100  # 路径总长 (覆盖 max_episode_steps * speed)
-        num_points = 4        # 控制点数量 (控制点越多，弯道越复杂)
+        # 1. 定义路径参数
+        total_length = 100.0  # 延长到100m
+        num_points = 6        # 适当增加控制点，使100m的弯道更平滑
         
-        # 3. 生成控制点 (Control Points)
-        # X轴：均匀分布
+        # 2. 生成控制点
         key_x = np.linspace(start_x, start_x + total_length, num_points)
-        
-        # Y轴：起点固定，后续点随机扰动
-        key_y = [start_y]
-        
-        # 第2个点波动小一点，保证起步平稳
-        key_y.append(start_y + self.rng.uniform(-2, 2))
-        
-        # 后续点产生较大波动 (模拟变道或S弯)
+        key_y = [start_y, start_y + self.rng.uniform(-2, 2)]
         for _ in range(num_points - 2):
-            last_y = key_y[-1]
-            # 随机偏移，但限制在视野范围内 (-30, 30)
-            next_y = last_y + self.rng.uniform(-10, 10) 
+            next_y = key_y[-1] + self.rng.uniform(-20, 20) 
             next_y = np.clip(next_y, -25, 25)
             key_y.append(next_y)
             
+        key_x = np.array(key_x)
         key_y = np.array(key_y)
         
-        # 4. 生成三次样条函数 y = f(x)
-        self.spline_func = CubicSpline(key_x, key_y)
+        # 3. 【核心】计算累积弦长 s (严格单调递增)
+        key_s = np.zeros(num_points)
+        for i in range(1, num_points):
+            key_s[i] = key_s[i-1] + np.hypot(key_x[i]-key_x[i-1], key_y[i]-key_y[i-1])
+            
+        self.max_s = key_s[-1] # 记录路径总物理弧长
         
-        # 5. 生成可视化用的离散点
-        self.path_x = np.linspace(start_x, start_x + total_length, 500)
-        self.path_y = self.spline_func(self.path_x)
+        # 4. 生成参数化样条 X = f(s), Y = g(s)
+        self.spline_x = CubicSpline(key_s, key_x)
+        self.spline_y = CubicSpline(key_s, key_y)
+        
+        # 5. 生成高密度离散点 (用于可视化与极速局部搜索投影)
+        self.path_s = np.linspace(0, self.max_s, 1000)
+        self.path_x = self.spline_x(self.path_s)
+        self.path_y = self.spline_y(self.path_s)
+        
+        # 6. 初始化跟踪锚点索引 (极大降低每步计算耗时)
+        self.current_s_idx = 0 
+
 
     def _get_spline_tracking_u1(self):
         """
-        [New Feature] 前车跟踪控制器
-        计算前车为了跟踪样条曲线所需的控制量 u1
+        [New Feature] 参数化样条前车跟踪控制器 (包含横向+纵向闭环控制)
         """
-        # 1. 获取前车当前状态
-        # 状态索引依赖 model 定义，通常: x[0-2]cargo, x[3]front_psi, x[4]rear_psi
-        # 我们使用 getXYi 获取前车中心坐标
         x_state = self.model.x
-        X_front, Y_front = self.model.getXYi(x_state, 0) # idx 0 是前车
-        Psi_front = x_state[3] # 前车航向角
+        X_front, Y_front = self.model.getXYi(x_state, 0)
+        Psi_front = x_state[3]
         
-        # 2. 预瞄 (Lookahead) 机制
-        # 不看当前位置，看前方一点点，这样走线更顺滑
-        lookahead_dist = 2.0 
-        target_x = X_front + lookahead_dist
+        # ================= 1. 横向控制 (转向) =================
+        # 1.1 寻找当前车辆在路径上的投影点 (极速局部搜索)
+        search_window = 20 
+        start_idx = max(0, self.current_s_idx - 5)
+        end_idx = min(len(self.path_s), self.current_s_idx + search_window)
         
-        # 3. 计算目标状态
-        # 利用样条函数计算目标Y和目标斜率
-        target_y = self.spline_func(target_x)
-        target_dy_dx = self.spline_func(target_x, 1) # 求一阶导数
+        dx = self.path_x[start_idx:end_idx] - X_front
+        dy = self.path_y[start_idx:end_idx] - Y_front
+        dists = dx**2 + dy**2
+        local_min_idx = np.argmin(dists)
         
-        # 目标航向角 (Desired Heading)
-        target_psi = np.arctan(target_dy_dx)
+        self.current_s_idx = start_idx + local_min_idx
+        current_s = self.path_s[self.current_s_idx]
         
-        # 4. 计算误差
-        # 横向误差 (Lateral Error): 当前Y 与 对应X处的路径Y 的差
-        current_y_ref = self.spline_func(X_front)
-        lat_error = Y_front - current_y_ref
+        # 1.2 计算横向偏差与预瞄航向误差
+        ref_x = self.path_x[self.current_s_idx]
+        ref_y = self.path_y[self.current_s_idx]
+        dx_ds_curr = self.spline_x(current_s, 1)
+        dy_ds_curr = self.spline_y(current_s, 1)
+        ref_psi = np.arctan2(dy_ds_curr, dx_ds_curr)
         
-        # 航向误差 (Heading Error)
+        lat_error = -(X_front - ref_x) * np.sin(ref_psi) + (Y_front - ref_y) * np.cos(ref_psi)
+        
+        lookahead_dist = 3.0 
+        target_s = min(current_s + lookahead_dist, self.max_s)
+        
+        dx_ds_target = self.spline_x(target_s, 1)
+        dy_ds_target = self.spline_y(target_s, 1)
+        target_psi = np.arctan2(dy_ds_target, dx_ds_target)
+        
         heading_error = self._normalize_angle(Psi_front - target_psi)
         
-        # 5. PD 控制律
-        # k_lat: 纠正偏离路线的力度
-        # k_head: 纠正车头朝向的力度
-        k_lat = 0.3   # 如果车摆动太大，减小这个值
-        k_head = 1.5  # 主要靠这个跟踪方向
-        
-        # 计算前轮转角 (Steering Angle)
-        # 注意符号：如果偏左(y大)，lat_error>0，需要负转角(向右)，所以是负号
+        # 1.3 横向 PD 控制律计算前轮转角
+        k_lat = 0.35
+        k_head = 1.5
         steer_cmd = -k_lat * lat_error - k_head * heading_error
-        
-        # 6. 约束与输出
         steer_cmd = np.clip(steer_cmd, self.steer_min_bound, self.steer_max_bound)
         
-        # 组装 u1: [Steer, ?, Thrust, ?]
-        # 保持推力恒定或稍微随机，主要改变转向
-        u1 = np.copy(self.u1_random)
-        u1[0] = steer_cmd # 覆盖转向角
+        # ================= 2. 纵向控制 (速度) =================
+        # 2.1 获取当前车速 (利用货物质心速度近似表示前车宏观速度)
+        # 在 model.py 中，广义坐标 q 的维度是 5 (N_q=5)，因此 x[5]和x[6] 是全局X和Y方向的速度
+        current_speed = np.hypot(x_state[5], x_state[6])
         
-        # 可选：根据转向角度适当减速 (模拟真实驾驶)
-        if np.abs(steer_cmd) > 0.2:
-             u1[2] *= 0.9 # 推力减小
-             u1[3] *= 0.9
-             
-        return u1.astype(np.float64)
+        # 2.2 定义目标巡航速度
+        target_speed = 2.0  # 目标速度 2.0 m/s (可根据需要修改)
+        
+        # 2.3 智能过弯减速机制 (曲率惩罚)
+        dx_ds2 = self.spline_x(target_s, 2)
+        dy_ds2 = self.spline_y(target_s, 2)
+        speed_norm = (dx_ds_target**2 + dy_ds_target**2)**1.5 + 1e-6
+        kappa = np.abs(dx_ds_target * dy_ds2 - dy_ds_target * dx_ds2) / speed_norm
+        
+        if kappa > 0.05:
+            # 如果前方是急弯，主动将目标速度降低，防止甩尾折叠
+            target_speed = 1.0 
+            
+        # 2.4 纵向 P 控制律计算驱动力
+        k_p_speed = 2000.0  # 速度误差比例系数 (N / (m/s))
+        speed_error = target_speed - current_speed
+        
+        T_cmd = k_p_speed * speed_error
+        
+        # 限制最大驱动力 (假设电机/发动机最大推力 3000N)
+        max_traction = 3000.0
+        T_cmd = np.clip(T_cmd, -max_traction, max_traction)
+        
+        # ================= 3. 动作整合 =================
+        # 放弃以前写死的 u1_random，完全由控制律接管
+        u1 = np.zeros(4, dtype=np.float64)
+        u1[0] = steer_cmd  # 前轮转向角
+        u1[1] = 0.0        # 后轮转向角 (如果前车是前轮转向的话)
+        u1[2] = T_cmd      # 前轴纵向驱动力
+        u1[3] = T_cmd      # 后轴纵向驱动力
+        
+        return u1
+
 
     def normalize_action(self, original_action):
         orig_range = self.original_action_high - self.original_action_low

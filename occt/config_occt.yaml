@@ -14,7 +14,7 @@ logger:
   backend: swanlab
   project_name: new_obs_vec_occt
   group_name: null
-  exp_name: v2.1(2048steps)
+  exp_name: v2.2(2048steps+new_pidcontroller)
   test_interval: 81920
   num_test_episodes: 4
   video: False
@@ -23,7 +23,7 @@ logger:
 
 # Optim
 optim:
-  lr: 1e-4
+  lr: 3e-4
   weight_decay: 0.0
   anneal_lr: True
   device:
