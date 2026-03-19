@@ -191,6 +191,8 @@ class TwoCarrierEnv(gym.Env):
             
         key_x = np.array(key_x)
         key_y = np.array(key_y)
+        self.key_x = key_x
+        self.key_y = key_y
         
         # 3. 【核心】计算累积弦长 s (严格单调递增)
         key_s = np.zeros(num_points)
@@ -554,7 +556,9 @@ class TwoCarrierEnv(gym.Env):
             "u2_original": original_action,
             "full_state": self.model.x.copy(),
             "hinge_force_penalty": self.hinge_force_penalty,
-            "control_smooth_penalty": self.control_smooth_penalty
+            "control_smooth_penalty": self.control_smooth_penalty,
+            "path_key_x": self.key_x.copy(),
+            "path_key_y": self.key_y.copy()
         }
         
         # # 物理熔断
@@ -693,6 +697,8 @@ class TwoCarrierEnv(gym.Env):
             "pos_error": 0.0,
             "hinge_force_penalty": 0.0,
             "control_smooth_penalty": 0.0,
+            "path_key_x": self.key_x.copy() if hasattr(self, 'key_x') else np.zeros(6, dtype=np.float64),
+            "path_key_y": self.key_y.copy() if hasattr(self, 'key_y') else np.zeros(6, dtype=np.float64)
         }
 
         return observation, info

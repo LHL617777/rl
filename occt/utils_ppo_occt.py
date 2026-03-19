@@ -82,7 +82,9 @@ def make_env(
             "full_state",
             "u1",
             "u2_original",
-            "Fh2"
+            "Fh2",
+            "path_key_x",
+            "path_key_y"
         ])
     base_env.set_info_dict_reader(
         info_dict_reader=default_info_dict_reader(info_keys_to_capture)

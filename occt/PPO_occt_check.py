@@ -103,7 +103,7 @@ def main(cfg: DictConfig):
     # 初始权重 (Phase 1): 很小，让它先学会跑
     W_FORCE_START = 1
     # [cite_start]最终权重 (Phase 2): 较大，迫使它优化受力
-    W_FORCE_END = 1
+    W_FORCE_END = 5
     # 课程开始的帧数 (前20%的时间先不加压)
     CURRICULUM_START_FRAME = 0 
     # 课程结束的帧数 (在训练结束前达到最大权重)

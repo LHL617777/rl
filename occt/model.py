@@ -52,6 +52,8 @@ class ModelBase:
         ax.set_xlabel('X (m)', fontsize=20)
         ax.set_ylabel('Y (m)', fontsize=20)
         ax.set_aspect('equal', adjustable='box')
+        if hasattr(self, 'path_x') and hasattr(self, 'path_y'):
+            ax.plot(self.path_x, self.path_y, 'r-.', linewidth=1.5, alpha=0.6, label='Target Path')
 
         # Clear directory
         dir_current = os.getcwd()
@@ -641,6 +643,26 @@ class Model2D2C(ModelBase):
         self.Fy_i = [0] * self.N_c
         self.Fh_arch = np.zeros((self.N + 1, 2 * self.N_c))  # hinge forces
 
+        # ================= [新增] 轮胎物理指标存档初始化 =================
+        # 用于记录前车(Carrier 1)的四个关键轮胎参数
+        self.alpha1_f_arch = np.zeros(self.N + 1)
+        self.alpha1_r_arch = np.zeros(self.N + 1)
+        self.Fy1_f_arch = np.zeros(self.N + 1)
+        self.Fy1_r_arch = np.zeros(self.N + 1)
+
+        # 用于记录后车(Carrier 2)的四个关键轮胎参数
+        self.alpha2_f_arch = np.zeros(self.N + 1)
+        self.alpha2_r_arch = np.zeros(self.N + 1)
+        self.Fy2_f_arch = np.zeros(self.N + 1)
+        self.Fy2_r_arch = np.zeros(self.N + 1)
+        
+        # 临时快照变量（极其关键：用来完美对齐 RK4 的 k1 时间步，消除相位误差）
+        self.alpha_f_temp = 0.0
+        self.alpha_r_temp = 0.0
+        self.Fy_f_temp = 0.0
+        self.Fy_r_temp = 0.0
+        # ==============================================================
+
     def step(
             self,
             u: list,
@@ -741,6 +763,20 @@ class Model2D2C(ModelBase):
 
             self.Fh_arch[self.count, 2 * i] = - (self.M_i[i] * X_ddot_i - self.Fx_i[i])
             self.Fh_arch[self.count, 2 * i + 1] = - (self.M_i[i] * Y_ddot_i - self.Fy_i[i])
+        # ================= [新增] 轮胎物理指标存档 =================
+        # 在计算 k1 的瞬间，将刚从 getxi 捕捉到的 temp 变量落盘
+        # 这样保证了数据和时间和状态是 100% 对应的，没有任何数值错位！
+        self.alpha1_f_arch[self.count] = self.alpha1_f_temp
+        self.alpha1_r_arch[self.count] = self.alpha1_r_temp
+        self.Fy1_f_arch[self.count] = self.Fy1_f_temp
+        self.Fy1_r_arch[self.count] = self.Fy1_r_temp
+
+        self.alpha2_f_arch[self.count] = self.alpha2_f_temp
+        self.alpha2_r_arch[self.count] = self.alpha2_r_temp
+        self.Fy2_f_arch[self.count] = self.Fy2_f_temp
+        self.Fy2_r_arch[self.count] = self.Fy2_r_temp
+
+        # =========================================================
 
     def getxi(
             self,
@@ -804,6 +840,21 @@ class Model2D2C(ModelBase):
             
             Fy_f_limited = F_lat_max_f * np.tanh(Fy_f_linear / F_lat_max_f)
             Fy_r_limited = F_lat_max_r * np.tanh(Fy_r_linear / F_lat_max_r)
+            # Fy_f_limited = self.C_f * alpha_f_i
+            # Fy_r_limited = self.C_r * alpha_r_i
+
+            # ================= [新增] 捕捉并快照前车的内部物理量 =================
+            if i == 0:
+                self.alpha1_f_temp = alpha_f_i
+                self.alpha1_r_temp = alpha_r_i
+                self.Fy1_f_temp = Fy_f_limited
+                self.Fy1_r_temp = Fy_r_limited
+            else:
+                self.alpha2_f_temp = alpha_f_i
+                self.alpha2_r_temp = alpha_r_i
+                self.Fy2_f_temp = Fy_f_limited
+                self.Fy2_r_temp = Fy_r_limited
+            # =================================================================
 
             # 3. 如果需要更严格的硬截断（防止数值溢出），可以再加一层 clip，但 tanh 通常够了
             # Fy_f_limited = np.clip(Fy_f_limited, -F_lat_max_f, F_lat_max_f)
